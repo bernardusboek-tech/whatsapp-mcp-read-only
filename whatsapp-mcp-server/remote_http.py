@@ -151,7 +151,12 @@ def build_http_app(config: HttpConfig, tool_source: FastMCP) -> ASGIApp:
         transport_security=security,
     )
     for tool in tool_source._tool_manager.list_tools():
-        server.add_tool(tool.fn, name=tool.name, description=tool.description)
+        server.add_tool(
+            tool.fn,
+            name=tool.name,
+            description=tool.description,
+            structured_output=False,
+        )
     _quiet_loggers()
     return RejectQueryCredentialMiddleware(server.streamable_http_app())
 

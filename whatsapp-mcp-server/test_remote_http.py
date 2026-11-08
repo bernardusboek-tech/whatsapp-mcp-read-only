@@ -159,6 +159,7 @@ class StreamableHttpTests(unittest.TestCase):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 listed = await session.list_tools()
+                await self._read_fixture(session)
         names = sorted(tool.name for tool in listed.tools)
         self.assertEqual(
             names,
@@ -176,6 +177,48 @@ class StreamableHttpTests(unittest.TestCase):
         )
         for banned in ("send_message", "send_file", "send_audio_message"):
             self.assertNotIn(banned, names)
+
+    async def _read_fixture(self, session: ClientSession) -> None:
+        import sqlite3
+        import tempfile
+
+        directory = Path(tempfile.mkdtemp(prefix="wa-http-db-"))
+        database = directory / "messages.db"
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP);
+            CREATE TABLE messages (
+                id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP,
+                is_from_me BOOLEAN, media_type TEXT, filename TEXT
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO chats VALUES (?,?,?)",
+            ("15550001111@s.whatsapp.net", "Synthetic Contact Alpha", "2024-01-02T03:04:05"),
+        )
+        connection.execute(
+            "INSERT INTO messages (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename) VALUES (?,?,?,?,?,0,'','')",
+            ("synthetic-alpha-1", "15550001111@s.whatsapp.net", "15550001111", "synthetic-fixture-alpha", "2024-01-02T03:04:05"),
+        )
+        connection.commit()
+        connection.close()
+        previous = {key: os.environ.get(key) for key in ("WA_INSTANCE_DIR", "WHATSAPP_DB_PATH", "WA_REPO_ROOT", "WA_DENY_DB_PATHS")}
+        os.environ["WA_INSTANCE_DIR"] = str(directory)
+        os.environ["WHATSAPP_DB_PATH"] = str(database)
+        os.environ.pop("WA_REPO_ROOT", None)
+        os.environ.pop("WA_DENY_DB_PATHS", None)
+        try:
+            result = await session.call_tool("list_messages", {"include_context": False, "limit": 5})
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        self.assertFalse(getattr(result, "isError", False), "list_messages returned a tool error")
+        self.assertIn("synthetic-fixture-alpha", str(result))
 
 
 class StdioCompatibilityTests(unittest.TestCase):
