@@ -15,6 +15,10 @@ Do not enable SSH for this. Task Scheduler can run the scripts as root.
    The window is three minutes from the container start.
 4. After the phone accepts the linked device, run:
    bash /volume1/docker/wa-readonly-2-install/steady.sh
+To replace only the running image after t276, without deleting the instance directory or the token:
+  bash /volume1/docker/wa-readonly-2-install/upgrade.sh /volume1/docker/wa-readonly-2-install/wa-readonly-private-t277.docker.tar.gz
+That recreate leaves pairing off. Run pair.sh only when the phone is in hand.
+If the QR image is still absent, read the container log line that begins bridge_not_started class=.
 5. The parent registers Mail separately at https://nas-2021.tailba1801.ts.net:44443/mcp
    The bearer is the NAS file /volume1/docker/wa-readonly-2/mcp-token. Do not send that file.
 

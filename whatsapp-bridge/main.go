@@ -22,6 +22,8 @@ func main() {
 	running, err := Start(cfg, client, stdoutLogger{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bridge not started\n")
+		fmt.Fprintf(os.Stderr, "%s\n", bridgeFailureLine(err))
+		fmt.Fprintf(os.Stderr, "%s\n", bridgeFailureDetail(err))
 		os.Exit(1)
 	}
 	if err := writeSecretFile(cfg.PIDPath(), []byte(fmt.Sprintf("%d\n", os.Getpid()))); err != nil {

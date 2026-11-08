@@ -83,7 +83,7 @@ func Start(cfg Config, client BridgeClient, log Logger) (*Running, error) {
 	if err := client.Connect(); err != nil {
 		client.Disconnect()
 		running.closeLocal()
-		return nil, fmt.Errorf("connect failed")
+		return nil, fmt.Errorf("connect failed: %w", err)
 	}
 	log.Infof("session connect requested")
 	return running, nil
@@ -95,7 +95,7 @@ func (r *Running) pair(ctx context.Context) error {
 		return err
 	}
 	if err := r.client.Connect(); err != nil {
-		return fmt.Errorf("connect failed")
+		return fmt.Errorf("connect failed: %w", err)
 	}
 	timeout := time.After(3 * time.Minute)
 	for {

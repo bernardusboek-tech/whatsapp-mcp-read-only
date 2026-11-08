@@ -1,0 +1,8 @@
+# Recreate the running service on the new image. Pairing stays off.
+
+services:
+  whatsapp-readonly:
+    image: localhost/wa-readonly-private:t277
+    environment:
+      WA_PAIR: "0"
+    restart: "no"
