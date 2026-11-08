@@ -13,13 +13,7 @@ fi
 [ -d "$WA_BASE/instance" ] || abort "instance directory is missing; run install.sh first"
 resolve_tools
 
-if "$DOCKER" compose version >/dev/null 2>&1; then
-  compose() { "$DOCKER" compose "$@"; }
-else
-  compose() { docker-compose "$@"; }
-fi
-
-compose -f "$KIT/compose.yaml" -f "$KIT/compose.pair.yaml" --project-directory "$KIT" up -d --force-recreate
+compose_up "$KIT/compose.pair.yaml"
 
 qr=""
 for _ in $(seq 1 30); do

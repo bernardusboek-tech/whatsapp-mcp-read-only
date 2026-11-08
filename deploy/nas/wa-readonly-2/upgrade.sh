@@ -35,15 +35,24 @@ WORK=$(mktemp -d)
 if ! "$TAILSCALE" serve status --json >"$WORK/serve-before.json"; then
   abort "tailscale serve status failed"
 fi
-run_check serve-before "$WORK/serve-before.json" || abort "443 serve config is not the expected handler"
+run_check serve-installed "$WORK/serve-before.json" || abort "installed 443 and 44443 routes are not the expected pair"
+cp -f "$WORK/serve-before.json" "$WORK/serve-snapshot.json"
 gzip -dc -- "$archive" | "$DOCKER" load
 "$DOCKER" image inspect localhost/wa-readonly-private:t277 >/dev/null
-if ! "$DOCKER" compose -f "$KIT/compose.yaml" -f "$KIT/compose.upgrade.yaml" --project-directory "$KIT" up -d --force-recreate; then
-  abort "recreate failed; instance data was not deleted"
+previous=$("$DOCKER" inspect -f '{{.Config.Image}}' wa-readonly-2)
+known_image "$previous" || abort "running image is not a known tag"
+pin_selected_image localhost/wa-readonly-private:t277
+if ! compose_up "$KIT/compose.upgrade.yaml" localhost/wa-readonly-private:t277; then
+  pin_selected_image "$previous"
+  abort "recreate failed; instance data was not deleted and Serve was not changed"
 fi
 if ! "$TAILSCALE" serve status --json >"$WORK/serve-after.json"; then
   abort "tailscale serve status failed after recreate"
 fi
-run_check serve-before "$WORK/serve-after.json" || abort "443 serve config changed; it was not reset"
-printf 'recreated with pairing off. Instance data and port 443 were kept.\n'
-printf 'When the phone is in hand, run pair.sh. If no image appears, the log line bridge_not_started class= names the failure.\n'
+if ! run_check serve-same "$WORK/serve-snapshot.json" "$WORK/serve-after.json"; then
+  pin_selected_image "$previous"
+  compose_up "$KIT/compose.upgrade.yaml" "$previous" || abort "serve config changed and the previous image could not be restored"
+  abort "serve config changed; previous image restored and Serve was not reset"
+fi
+printf 'recreated t277 with pairing off. Instance data, 443, and 44443 were kept.\n'
+printf 'Run net-diag.sh before pair.sh. Pair only when the phone is in hand.\n'

@@ -18,12 +18,6 @@ if ! printf '%s\n' "$logs" | grep -q 'pairing finished'; then
   abort "pairing finished was not in the container log; left the container unchanged"
 fi
 
-if "$DOCKER" compose version >/dev/null 2>&1; then
-  compose() { "$DOCKER" compose "$@"; }
-else
-  compose() { docker-compose "$@"; }
-fi
-
-compose -f "$KIT/compose.yaml" -f "$KIT/compose.steady.yaml" --project-directory "$KIT" up -d --force-recreate
+compose_up "$KIT/compose.steady.yaml"
 rm -f -- "$WA_BASE/pairing-qr.png" "$WA_BASE/instance/pairing-qr.png" "$WA_BASE/instance/pairing.payload"
 printf 'pairing is off and the qr image was removed. Mail connector URL is https://nas-2021.tailba1801.ts.net:44443/mcp\n'

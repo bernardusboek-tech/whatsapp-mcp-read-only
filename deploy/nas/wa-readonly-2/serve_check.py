@@ -102,6 +102,36 @@ def check_before(config):
         raise ValueError("44443 tcp is already present")
 
 
+def check_installed(config):
+    handlers = handlers_of(config, HOST_443)
+    if set(handlers) != {"/"} or handlers["/"].get("Proxy") != PROXY_443:
+        raise ValueError("443 root proxy is not 127.0.0.1:8088")
+    funnel = config.get("AllowFunnel")
+    if not isinstance(funnel, dict) or funnel.get(HOST_443) is not True:
+        raise ValueError("443 funnel is not exactly true")
+    if funnel.get(HOST_44443) is True:
+        raise ValueError("44443 funnel is enabled")
+    for key, value in funnel.items():
+        if key not in {HOST_443, HOST_44443} and value is True:
+            raise ValueError("another funnel is enabled")
+    if set(config.get("Web", {})) != {HOST_443, HOST_44443}:
+        raise ValueError("web hosts are not exactly 443 and 44443")
+    added = handlers_of(config, HOST_44443)
+    if set(added) != {"/mcp"} or added["/mcp"].get("Proxy") != PROXY_44443:
+        raise ValueError("44443 is not the installed private route")
+    https = tcp_entry(config, 443)
+    private = tcp_entry(config, 44443)
+    if not isinstance(https, dict) or https.get("HTTPS") is not True:
+        raise ValueError("443 TCP https is not true")
+    if not isinstance(private, dict) or private.get("HTTPS") is not True:
+        raise ValueError("44443 TCP https is not true")
+
+
+def check_same(before, after):
+    if before != after:
+        raise ValueError("serve config is not an exact match")
+
+
 def check_after(before, after):
     check_before(before)
     if before["Web"][HOST_443] != after["Web"][HOST_443]:
@@ -293,6 +323,10 @@ def main(argv):
             check_subnets(argv[2], argv[3], argv[4])
         elif command == "serve-before":
             check_before(load_json(argv[2]))
+        elif command == "serve-installed":
+            check_installed(load_json(argv[2]))
+        elif command == "serve-same":
+            check_same(load_json(argv[2]), load_json(argv[3]))
         elif command == "serve-after":
             check_after(load_json(argv[2]), load_json(argv[3]))
         elif command == "names":

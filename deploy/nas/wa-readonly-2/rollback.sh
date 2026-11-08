@@ -13,35 +13,25 @@ if [ "${WA_ALLOW_NONROOT:-0}" != "1" ] && [ "$(id -u)" -ne 0 ]; then
 fi
 
 resolve_tools
-if ! "$TAILSCALE" serve --https=44443 --set-path=/mcp off; then
-  if "$TAILSCALE" serve status --json | grep -q '44443'; then
-    abort "44443 is still served and was not removed"
-  fi
+if ! ensure_python; then
+  abort "python3 is not available"
 fi
-
-if ! "$DOCKER" compose -f "$KIT/compose.yaml" --project-directory "$KIT" down; then
-  abort "could not remove project wa-readonly-2"
+if [ "${1:-}" = "t276" ] || [ "${1:-}" = "t277" ]; then
+  pin_selected_image "localhost/wa-readonly-private:${1}"
 fi
-if ! names=$("$DOCKER" ps -a --format '{{.Names}}'); then
-  abort "docker ps failed during rollback"
+WORK=$(mktemp -d)
+if ! "$TAILSCALE" serve status --json >"$WORK/serve-before.json"; then
+  abort "tailscale serve status failed"
 fi
-if printf '%s\n' "$names" | grep -qx 'wa-readonly-2'; then
-  "$DOCKER" rm -f wa-readonly-2
+run_check serve-installed "$WORK/serve-before.json" || abort "installed 443 and 44443 routes are not the expected pair"
+if ! compose_up "$KIT/compose.upgrade.yaml"; then
+  abort "recreate failed; Serve was not changed"
 fi
-if ! netnames=$("$DOCKER" network ls --format '{{.Name}}'); then
-  abort "docker network ls failed during rollback"
+if ! "$TAILSCALE" serve status --json >"$WORK/serve-after.json"; then
+  abort "tailscale serve status failed after recreate"
 fi
-if printf '%s\n' "$netnames" | grep -qx 'wa_readonly_2'; then
-  "$DOCKER" network rm wa_readonly_2
+run_check serve-same "$WORK/serve-before.json" "$WORK/serve-after.json" || abort "serve config changed; 443 and 44443 were not reset"
+if [ "${2:-}" = "--remove-data" ]; then
+  abort "refusing to combine an image rollback with data deletion"
 fi
-
-if [ "${1:-}" = "--remove-data" ]; then
-  case "$WA_BASE" in
-    /volume1/docker/wa-readonly-2|/tmp/*) rm -rf -- "$WA_BASE" ;;
-    *) abort "refusing to delete an unexpected path" ;;
-  esac
-  printf 'removed the new data directory\n'
-else
-  printf 'container and port 44443 removed. Data directory kept.\n'
-fi
-printf 'port 443 was not reset.\n'
+printf 'container recreated with pairing off. Ports 443 and 44443 were not changed.\n'

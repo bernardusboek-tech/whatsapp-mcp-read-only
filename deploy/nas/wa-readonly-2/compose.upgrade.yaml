@@ -1,8 +1,7 @@
-# Recreate the running service on the new image. Pairing stays off.
+# Pairing stays off. The image comes from image.override.yaml, not from this file.
 
 services:
   whatsapp-readonly:
-    image: localhost/wa-readonly-private:t277
     environment:
       WA_PAIR: "0"
     restart: "no"

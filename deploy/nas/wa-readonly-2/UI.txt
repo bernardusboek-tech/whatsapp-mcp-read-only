@@ -15,6 +15,9 @@ Do not enable SSH for this. Task Scheduler can run the scripts as root.
    The window is three minutes from the container start.
 4. After the phone accepts the linked device, run:
    bash /volume1/docker/wa-readonly-2-install/steady.sh
+Run net-diag.sh first, against the container that is already up. It does not recreate it or change Serve.
+  bash /volume1/docker/wa-readonly-2-install/net-diag.sh
+Do not run upgrade.sh until that output is saved. Upgrade now accepts the existing 44443 route and does not remove it.
 To replace only the running image after t276, without deleting the instance directory or the token:
   bash /volume1/docker/wa-readonly-2-install/upgrade.sh /volume1/docker/wa-readonly-2-install/wa-readonly-private-t277.docker.tar.gz
 That recreate leaves pairing off. Run pair.sh only when the phone is in hand.

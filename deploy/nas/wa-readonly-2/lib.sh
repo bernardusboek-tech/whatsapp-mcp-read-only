@@ -114,6 +114,80 @@ resolve_boekbe() {
   export BOEKBE_UID BOEKBE_GID
 }
 
+known_image() {
+  case "$1" in
+    localhost/wa-readonly-private:t276|localhost/wa-readonly-private:t277) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pin_selected_image() {
+  known_image "$1" || abort "refusing unknown image"
+  printf '%s\n' "$1" > "$WA_BASE/selected-image"
+  chmod 644 "$WA_BASE/selected-image"
+}
+
+resolve_selected_image() {
+  local recorded="" running="" inspect_rc
+  if [ -f "$WA_BASE/selected-image" ]; then
+    recorded=$(tr -cd 'A-Za-z0-9.:_/-' < "$WA_BASE/selected-image")
+  fi
+  set +e
+  running=$("$DOCKER" inspect -f '{{.Config.Image}}' wa-readonly-2 2>/dev/null)
+  inspect_rc=$?
+  set -e
+  if [ "$inspect_rc" -gt 1 ]; then
+    abort "docker inspect failed"
+  fi
+  running=$(printf '%s' "$running" | tr -cd 'A-Za-z0-9.:_/-')
+  if [ -n "$recorded" ] && ! known_image "$recorded"; then
+    abort "selected image file is not a known tag"
+  fi
+  if [ -n "$running" ] && ! known_image "$running"; then
+    abort "running container image is not a known tag"
+  fi
+  if [ -n "$recorded" ] && [ -n "$running" ] && [ "$recorded" != "$running" ]; then
+    abort "selected image file does not match the running container"
+  fi
+  if [ -n "$recorded" ]; then
+    printf '%s\n' "$recorded"
+    return 0
+  fi
+  if [ -n "$running" ]; then
+    pin_selected_image "$running"
+    printf '%s\n' "$running"
+    return 0
+  fi
+  abort "no selected image is recorded"
+}
+
+write_image_override() {
+  local image="$1"
+  local override="$WA_BASE/image.override.yaml"
+  known_image "$image" || abort "refusing unknown image"
+  printf 'services:\n  whatsapp-readonly:\n    image: %s\n' "$image" > "$override"
+  chmod 644 "$override"
+  printf '%s\n' "$override"
+}
+
+compose_up() {
+  local extra="$1"
+  local image="${2:-}"
+  local override
+  if [ -z "$image" ]; then
+    image=$(resolve_selected_image) || exit 1
+  fi
+  override=$(write_image_override "$image") || exit 1
+  if ! "$DOCKER" compose version >/dev/null 2>&1; then
+    abort "docker compose is not available"
+  fi
+  if [ -n "$extra" ]; then
+    "$DOCKER" compose -f "$KIT/compose.yaml" -f "$override" -f "$extra" --project-directory "$KIT" up -d --force-recreate
+  else
+    "$DOCKER" compose -f "$KIT/compose.yaml" -f "$override" --project-directory "$KIT" up -d --force-recreate
+  fi
+}
+
 capture_file() {
   local destination="$1"
   shift
@@ -253,30 +327,4 @@ preflight() {
   assert_subnet_free
   assert_serve_before
   printf 'preflight accepted\n'
-}
-
-publish_qr() {
-  local source="$1"
-  local dest="$WA_BASE/pairing-qr.png"
-  resolve_tools
-  resolve_boekbe
-  [ -d "$WA_BASE/instance" ] || abort "instance directory is missing"
-  [ -s "$source" ] || abort "pairing image is missing"
-  set -- $("$ID_BIN" -u "$BOEKBE_USER")
-  local mode owner
-  mode=$(stat -c '%a' "$WA_BASE")
-  [ "$mode" = "755" ] || abort "new directory is not mode 0755; existing permissions were not changed"
-  mode=$(stat -c '%a %u' "$WA_BASE/instance")
-  [ "$mode" = "700 65532" ] || abort "instance directory permissions were not changed"
-  if [ -e "$WA_BASE/mcp-token" ]; then
-    mode=$(stat -c '%a %u' "$WA_BASE/mcp-token")
-    [ "$mode" = "600 65532" ] || abort "token permissions were not changed"
-  fi
-  install -m 0600 "$source" "$dest"
-  chown "${BOEKBE_UID}:${BOEKBE_GID}" "$dest"
-  chmod 0600 "$dest"
-  owner=$(stat -c '%a %u %g' "$dest")
-  [ "$owner" = "600 ${BOEKBE_UID} ${BOEKBE_GID}" ] || abort "qr copy is not owned by boekbe mode 0600"
-  mode=$(stat -c '%a %u' "$WA_BASE/instance")
-  [ "$mode" = "700 65532" ] || abort "instance directory changed while copying the qr"
 }
