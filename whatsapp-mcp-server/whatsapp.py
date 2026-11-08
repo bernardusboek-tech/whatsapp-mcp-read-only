@@ -1,14 +1,55 @@
 import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List
+import os
 import os.path
-import requests
 import json
-import audio
+import socket
+import urllib.parse
+from http.client import HTTPConnection
 
-MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
-WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
+class ConfigError(RuntimeError):
+    """Raised when instance paths are missing or point outside the instance."""
+
+def require_messages_db() -> str:
+    """Return the absolute read-only message database for this instance.
+
+    There is no default path. A relative path, a path outside WA_INSTANCE_DIR,
+    a repository path, or a denied path is rejected.
+    """
+    instance = os.environ.get("WA_INSTANCE_DIR", "").strip()
+    db = os.environ.get("WHATSAPP_DB_PATH", "").strip()
+    if not instance or not os.path.isabs(instance):
+        raise ConfigError("WA_INSTANCE_DIR must be an absolute path")
+    if not db or not os.path.isabs(db):
+        raise ConfigError("WHATSAPP_DB_PATH must be an absolute path")
+    instance_real = os.path.realpath(instance)
+    db_real = os.path.realpath(db)
+    expected = os.path.realpath(os.path.join(instance, "messages.db"))
+    if db_real != expected:
+        raise ConfigError("WHATSAPP_DB_PATH must be messages.db inside WA_INSTANCE_DIR")
+    repo = os.environ.get("WA_REPO_ROOT", "").strip()
+    if repo:
+        repo_real = os.path.realpath(repo)
+        if db_real == repo_real or db_real.startswith(repo_real + os.sep):
+            raise ConfigError("database must be outside the repository")
+    deny = os.environ.get("WA_DENY_DB_PATHS", "")
+    for part in deny.split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        if not os.path.isabs(part):
+            raise ConfigError("WA_DENY_DB_PATHS entries must be absolute")
+        denied = os.path.realpath(part) if os.path.exists(part) else os.path.abspath(part)
+        if db_real == denied or db_real.startswith(denied + os.sep) or denied.startswith(db_real + os.sep):
+            raise ConfigError("database path is denied")
+    return db_real
+
+def connect_ro() -> sqlite3.Connection:
+    path = require_messages_db()
+    uri = "file:" + urllib.parse.quote(path) + "?mode=ro"
+    return sqlite3.connect(uri, uri=True)
 
 @dataclass
 class Message:
@@ -49,7 +90,7 @@ class MessageContext:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         # First try matching by exact JID
@@ -135,7 +176,7 @@ def list_messages(
 ) -> List[Message]:
     """Get messages matching the specified criteria with optional context."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         # Build base query
@@ -230,7 +271,7 @@ def get_message_context(
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         # Get the target message first
@@ -325,7 +366,7 @@ def list_chats(
 ) -> List[Chat]:
     """Get chats matching the specified criteria."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         # Build base query
@@ -393,7 +434,7 @@ def list_chats(
 def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         # Split query into characters to support partial matching
@@ -441,7 +482,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -486,7 +527,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -535,7 +576,7 @@ def get_last_interaction(jid: str) -> str:
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
     """Get chat metadata by JID."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         query = """
@@ -583,7 +624,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = connect_ro()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -623,44 +664,67 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
             conn.close()
 
 
+class _UnixHTTPConnection(HTTPConnection):
+    """HTTP over a Unix socket. This process does not open a TCP connection."""
+
+    def __init__(self, socket_path: str):
+        super().__init__("localhost")
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(self.socket_path)
+        self.sock = sock
+
+def _bridge_auth() -> tuple:
+    instance = os.environ.get("WA_INSTANCE_DIR", "").strip()
+    if not instance or not os.path.isabs(instance):
+        raise ConfigError("WA_INSTANCE_DIR must be an absolute path")
+    instance_real = os.path.realpath(instance)
+    sock = os.path.join(instance_real, "bridge.sock")
+    token_path = os.path.join(instance_real, "bridge.token")
+    if os.path.islink(sock):
+        raise ConfigError("bridge socket must not be a symlink")
+    if os.path.dirname(os.path.realpath(sock) if os.path.exists(sock) else sock) != instance_real:
+        raise ConfigError("bridge socket must stay inside the instance directory")
+    with open(token_path, "r", encoding="utf-8") as handle:
+        token = handle.read().strip()
+    if not token:
+        raise ConfigError("bridge token is empty")
+    return sock, token
+
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
-    """Download media from a message and return the local file path.
-    
-    Args:
-        message_id: The ID of the message containing the media
-        chat_jid: The JID of the chat containing the message
-    
-    Returns:
-        The local file path if download was successful, None otherwise
+    """Ask the local bridge to download media and return the file path.
+
+    The request goes to the instance Unix socket only. There is no TCP client
+    and no send route.
     """
     try:
-        url = f"{WHATSAPP_API_BASE_URL}/download"
-        payload = {
-            "message_id": message_id,
-            "chat_jid": chat_jid
-        }
-        
-        response = requests.post(url, json=payload)
-        
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success", False):
-                path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
-                return path
-            else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
-                return None
-        else:
-            print(f"Error: HTTP {response.status_code} - {response.text}")
+        sock, token = _bridge_auth()
+        payload = json.dumps({"message_id": message_id, "chat_jid": chat_jid}).encode("utf-8")
+        conn = _UnixHTTPConnection(sock)
+        conn.request(
+            "POST",
+            "/api/download",
+            body=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Content-Length": str(len(payload)),
+                "Authorization": f"Bearer {token}",
+            },
+        )
+        response = conn.getresponse()
+        raw = response.read()
+        if response.status != 200:
+            print("download failed")
             return None
-            
-    except requests.RequestException as e:
-        print(f"Request error: {str(e)}")
+        result = json.loads(raw.decode("utf-8"))
+        if result.get("success"):
+            return result.get("path")
+        print("download failed")
         return None
-    except json.JSONDecodeError:
-        print(f"Error parsing response: {response.text}")
-        return None
-    except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+    except ConfigError:
+        raise
+    except (OSError, json.JSONDecodeError):
+        print("download failed")
         return None
