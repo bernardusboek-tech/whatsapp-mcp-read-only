@@ -11,3 +11,5 @@ bridge.out
 bridge.err
 pairing.payload
 mcp-token
+__pycache__/
+*.pyc
