@@ -5,11 +5,8 @@ set -eu
 transport=${WA_MCP_TRANSPORT:-}
 bridge=${WA_RUN_BRIDGE:-0}
 
-if [ "$bridge" = "1" ] && [ "${WA_PAIR:-0}" = "1" ]; then
-  echo "WA_PAIR is not enabled by this image entrypoint" >&2
-  exit 2
-fi
-
+# WA_PAIR defaults to off. An explicit 1 reaches the bridge, which writes the
+# code only into the instance directory. This script never prints that code.
 if [ "$bridge" = "1" ] && [ "$transport" = "stdio" ]; then
   echo "stdio cannot share container stdin with the bridge" >&2
   exit 2

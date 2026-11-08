@@ -108,6 +108,9 @@ func (r *Running) pair(ctx context.Context) error {
 				if err := writeSecretFile(r.cfg.PairingPath(), []byte(evt.Code+"\n")); err != nil {
 					return err
 				}
+				if err := writePairingQR(r.cfg.PairingQRPath(), evt.Code); err != nil {
+					return err
+				}
 				r.log.Infof("pairing payload written")
 			} else if evt.Event == "success" {
 				r.log.Infof("pairing finished")

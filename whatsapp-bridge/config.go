@@ -15,13 +15,14 @@ type Config struct {
 	Pair        bool
 }
 
-func (c Config) SessionDB() string   { return filepath.Join(c.InstanceDir, "session.db") }
-func (c Config) MessagesDB() string  { return filepath.Join(c.InstanceDir, "messages.db") }
-func (c Config) MediaDir() string    { return filepath.Join(c.InstanceDir, "media") }
-func (c Config) SocketPath() string  { return filepath.Join(c.InstanceDir, "bridge.sock") }
-func (c Config) TokenPath() string   { return filepath.Join(c.InstanceDir, "bridge.token") }
-func (c Config) PIDPath() string     { return filepath.Join(c.InstanceDir, "bridge.pid") }
-func (c Config) PairingPath() string { return filepath.Join(c.InstanceDir, "pairing.payload") }
+func (c Config) SessionDB() string     { return filepath.Join(c.InstanceDir, "session.db") }
+func (c Config) MessagesDB() string    { return filepath.Join(c.InstanceDir, "messages.db") }
+func (c Config) MediaDir() string      { return filepath.Join(c.InstanceDir, "media") }
+func (c Config) SocketPath() string    { return filepath.Join(c.InstanceDir, "bridge.sock") }
+func (c Config) TokenPath() string     { return filepath.Join(c.InstanceDir, "bridge.token") }
+func (c Config) PIDPath() string       { return filepath.Join(c.InstanceDir, "bridge.pid") }
+func (c Config) PairingPath() string   { return filepath.Join(c.InstanceDir, "pairing.payload") }
+func (c Config) PairingQRPath() string { return filepath.Join(c.InstanceDir, "pairing-qr.png") }
 
 // LoadConfigFromEnv reads the instance location from the environment.
 // WA_INSTANCE_DIR is required. WA_DENY_INSTANCE_DIRS and WA_REPO_ROOT are

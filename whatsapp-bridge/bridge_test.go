@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"image"
+	_ "image/png"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/makiuchi-d/gozxing"
+	qrdecode "github.com/makiuchi-d/gozxing/qrcode"
 	"go.mau.fi/whatsmeow"
 	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
@@ -249,6 +253,33 @@ func TestPairingPayloadIsNotLogged(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Fatalf("pairing file mode = %o", info.Mode().Perm())
+	}
+	qrInfo, err := os.Stat(cfg.PairingQRPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if qrInfo.Mode().Perm() != 0600 {
+		t.Fatalf("pairing qr mode = %o", qrInfo.Mode().Perm())
+	}
+	qrFile, err := os.Open(cfg.PairingQRPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qrFile.Close()
+	img, _, err := image.Decode(qrFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bitmap, err := gozxing.NewBinaryBitmapFromImage(img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := qrdecode.NewQRCodeReader().Decode(bitmap, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.GetText() != secret {
+		t.Fatal("pairing qr did not decode to the fixture")
 	}
 	if strings.Contains(log.text(), secret) {
 		t.Fatalf("log contained pairing payload: %s", log.text())

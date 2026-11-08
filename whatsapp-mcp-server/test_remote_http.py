@@ -53,6 +53,38 @@ class HttpConfigTests(unittest.TestCase):
         with self.assertRaises(remote_http.TransportConfigError):
             remote_http.load_http_config(env)
 
+    def test_private_tailnet_bind_is_explicit(self):
+        base = self._base()
+        token = write_token(base, "synthetic-token-value")
+        env = {
+            "WA_MCP_TRANSPORT": "streamable-http",
+            "MCP_AUTH_TOKEN_FILE": str(token),
+            "WA_MCP_PORT": "12789",
+            "WA_MCP_BIND": "172.30.240.2",
+            "WA_MCP_ALLOW_NON_LOOPBACK": "1",
+            "WA_MCP_ALLOWED_HOSTS": "nas-2021.tailba1801.ts.net:44443",
+            "WA_MCP_RESOURCE_URL": "https://nas-2021.tailba1801.ts.net:44443",
+        }
+        config = remote_http.load_http_config(env)
+        self.assertEqual(config.bind, "172.30.240.2")
+        self.assertEqual(config.port, 12789)
+        self.assertEqual(config.allowed_hosts, ["nas-2021.tailba1801.ts.net:44443"])
+        self.assertEqual(config.resource_url, "https://nas-2021.tailba1801.ts.net:44443")
+
+    def test_private_tailnet_bind_requires_the_guard(self):
+        base = self._base()
+        token = write_token(base, "synthetic-token-value")
+        env = {
+            "WA_MCP_TRANSPORT": "streamable-http",
+            "MCP_AUTH_TOKEN_FILE": str(token),
+            "WA_MCP_PORT": "12789",
+            "WA_MCP_BIND": "172.30.240.2",
+            "WA_MCP_ALLOWED_HOSTS": "nas-2021.tailba1801.ts.net:44443",
+            "WA_MCP_RESOURCE_URL": "https://nas-2021.tailba1801.ts.net:44443",
+        }
+        with self.assertRaises(remote_http.TransportConfigError):
+            remote_http.load_http_config(env)
+
     def test_missing_token_file_is_rejected(self):
         env = {
             "WA_MCP_TRANSPORT": "streamable-http",

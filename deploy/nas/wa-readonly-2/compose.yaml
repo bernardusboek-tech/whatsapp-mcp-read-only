@@ -1,0 +1,43 @@
+# Initial start. Pairing stays off. Do not publish this port on the LAN.
+
+name: wa-readonly-2
+
+networks:
+  wa_readonly_2:
+    ipam:
+      config:
+        - subnet: 172.30.240.0/29
+
+services:
+  whatsapp-readonly:
+    container_name: wa-readonly-2
+    image: localhost/wa-readonly-private:t276
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks:
+      wa_readonly_2:
+        ipv4_address: 172.30.240.2
+    ports:
+      - "127.0.0.1:12789:12789"
+    volumes:
+      - /volume1/docker/wa-readonly-2/instance:/var/lib/wa-instance
+      - /volume1/docker/wa-readonly-2/mcp-token:/run/secrets/mcp-token:ro
+    environment:
+      WA_INSTANCE_DIR: /var/lib/wa-instance
+      WA_MCP_TRANSPORT: streamable-http
+      WA_MCP_BIND: 172.30.240.2
+      WA_MCP_ALLOW_NON_LOOPBACK: "1"
+      WA_MCP_PORT: "12789"
+      WA_MCP_ALLOWED_HOSTS: nas-2021.tailba1801.ts.net:44443
+      WA_MCP_RESOURCE_URL: https://nas-2021.tailba1801.ts.net:44443
+      MCP_AUTH_TOKEN_FILE: /run/secrets/mcp-token
+      WA_RUN_BRIDGE: "1"
+      WA_PAIR: "0"
+    restart: "no"

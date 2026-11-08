@@ -1,0 +1,7 @@
+# Used by steady.sh after the phone link has finished.
+
+services:
+  whatsapp-readonly:
+    environment:
+      WA_PAIR: "0"
+    restart: unless-stopped

@@ -1,0 +1,8 @@
+# Used only by pair.sh, and only while the phone is in hand.
+# Same service as compose.yaml except WA_PAIR.
+
+services:
+  whatsapp-readonly:
+    environment:
+      WA_PAIR: "1"
+    restart: "no"
