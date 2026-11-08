@@ -62,7 +62,9 @@ A future connection uses the WhatsApp web multidevice API through the pinned [wh
    }
    ```
 
-   `WHATSAPP_DB_PATH` must be exactly `$WA_INSTANCE_DIR/messages.db`. The MCP process opens it with SQLite `mode=ro`. Media download uses the Unix socket and token file inside that directory. There is no TCP port.
+   `WHATSAPP_DB_PATH` must be exactly `$WA_INSTANCE_DIR/messages.db`. The MCP process opens it with SQLite `mode=ro`. Media download uses the Unix socket and token file inside that directory. The bridge does not listen on TCP.
+
+   `scripts/run-mcp.sh` forces `WA_MCP_TRANSPORT=stdio`. A remote listener is a separate opt-in, `WA_MCP_TRANSPORT=streamable-http`, and it refuses to start without `MCP_AUTH_TOKEN_FILE` pointing at a token file outside this repository. Clients send `Authorization: Bearer <token>`. The token is not read from the query string. The default bind is `127.0.0.1`. A present `Origin` is rejected unless `WA_MCP_ALLOWED_ORIGINS` lists it, and the `Host` header must match the configured listener. `mcp` 1.25.0 is pinned because 1.6.0 has no Streamable HTTP; the Python tool API stays the same FastMCP decorators. This process cannot tell Mail from any other client that has the bearer and can reach the port. Do not put the token, a real hostname, or an account id in the image or in git. `Dockerfile` and `deploy/compose.example.yaml` are an unbooted candidate: loopback publish, no host network, no Docker socket, no privileged mode, and no automatic pairing.
 
    For **Claude**, save this as `claude_desktop_config.json` in your Claude Desktop configuration directory at:
 

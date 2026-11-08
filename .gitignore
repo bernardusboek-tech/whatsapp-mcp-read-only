@@ -10,3 +10,4 @@ bridge.pid
 bridge.out
 bridge.err
 pairing.payload
+mcp-token

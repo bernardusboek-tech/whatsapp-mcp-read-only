@@ -177,6 +177,23 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "message": "Failed to download media"
         }
 
+def main() -> None:
+    """Stdio unless streamable HTTP is explicitly selected."""
+    from remote_http import TransportConfigError, load_http_config, resolve_transport, serve_http
+
+    try:
+        transport = resolve_transport()
+    except TransportConfigError:
+        raise SystemExit(2)
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+    try:
+        config = load_http_config()
+    except TransportConfigError:
+        raise SystemExit(2)
+    serve_http(config, mcp)
+
+
 if __name__ == "__main__":
-    # Initialize and run the server
-    mcp.run(transport='stdio')
+    main()

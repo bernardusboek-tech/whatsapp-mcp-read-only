@@ -74,4 +74,5 @@ kill -TERM "$stray_pid" 2>/dev/null || true
 env_out=$("$root/scripts/run-mcp.sh" "$a" --print-env)
 printf '%s\n' "$env_out" | grep -Fxq "WA_INSTANCE_DIR=$a"
 printf '%s\n' "$env_out" | grep -Fxq "WHATSAPP_DB_PATH=$a/messages.db"
+printf '%s\n' "$env_out" | grep -Fxq "WA_MCP_TRANSPORT=stdio"
 echo "lifecycle checks passed"

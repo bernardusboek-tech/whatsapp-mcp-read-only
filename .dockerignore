@@ -1,0 +1,10 @@
+.git
+**/.venv
+**/*.db
+**/*.db-journal
+**/*.db-wal
+**/pairing.payload
+**/bridge.token
+**/bridge.pid
+**/mcp-token
+**/.env
