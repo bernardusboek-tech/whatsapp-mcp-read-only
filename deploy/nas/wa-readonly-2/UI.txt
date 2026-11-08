@@ -9,7 +9,8 @@ Do not enable SSH for this. Task Scheduler can run the scripts as root.
    The token is created on the NAS as mode 0600. It is not printed.
 3. When the phone is in hand, run a second task:
    bash /volume1/docker/wa-readonly-2-install/pair.sh
-   File Station, open /volume1/docker/wa-readonly-2/pairing-qr.png and scan that image.
+   File Station, logged in as DSM user boekbe, open /volume1/docker/wa-readonly-2/pairing-qr.png and scan that image.
+   That copy is mode 0600 and owned by boekbe. The instance directory and the token stay unreadable to boekbe.
    Do not open pairing.payload. The text is not a picture the phone can scan.
    The window is three minutes from the container start.
 4. After the phone accepts the linked device, run:

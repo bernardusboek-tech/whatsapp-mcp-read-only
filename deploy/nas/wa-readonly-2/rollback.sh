@@ -12,15 +12,28 @@ if [ "${WA_ALLOW_NONROOT:-0}" != "1" ] && [ "$(id -u)" -ne 0 ]; then
   abort "run as root from DSM Task Scheduler"
 fi
 
-"$TAILSCALE" serve --https=44443 --set-path=/mcp off || true
-
-if "$DOCKER" compose version >/dev/null 2>&1; then
-  "$DOCKER" compose -f "$KIT/compose.yaml" --project-directory "$KIT" down || true
-elif command -v docker-compose >/dev/null 2>&1; then
-  docker-compose -f "$KIT/compose.yaml" --project-directory "$KIT" down || true
+resolve_tools
+if ! "$TAILSCALE" serve --https=44443 --set-path=/mcp off; then
+  if "$TAILSCALE" serve status --json | grep -q '44443'; then
+    abort "44443 is still served and was not removed"
+  fi
 fi
-"$DOCKER" rm -f wa-readonly-2 >/dev/null 2>&1 || true
-"$DOCKER" network rm wa-readonly-2 >/dev/null 2>&1 || true
+
+if ! "$DOCKER" compose -f "$KIT/compose.yaml" --project-directory "$KIT" down; then
+  abort "could not remove project wa-readonly-2"
+fi
+if ! names=$("$DOCKER" ps -a --format '{{.Names}}'); then
+  abort "docker ps failed during rollback"
+fi
+if printf '%s\n' "$names" | grep -qx 'wa-readonly-2'; then
+  "$DOCKER" rm -f wa-readonly-2
+fi
+if ! netnames=$("$DOCKER" network ls --format '{{.Name}}'); then
+  abort "docker network ls failed during rollback"
+fi
+if printf '%s\n' "$netnames" | grep -qx 'wa_readonly_2'; then
+  "$DOCKER" network rm wa_readonly_2
+fi
 
 if [ "${1:-}" = "--remove-data" ]; then
   case "$WA_BASE" in

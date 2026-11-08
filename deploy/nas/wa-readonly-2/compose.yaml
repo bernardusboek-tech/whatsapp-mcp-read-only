@@ -4,6 +4,7 @@ name: wa-readonly-2
 
 networks:
   wa_readonly_2:
+    name: wa_readonly_2
     ipam:
       config:
         - subnet: 172.30.240.0/29

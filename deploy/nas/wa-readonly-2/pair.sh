@@ -11,6 +11,7 @@ if [ "${WA_ALLOW_NONROOT:-0}" != "1" ] && [ "$(id -u)" -ne 0 ]; then
   abort "run as root from DSM Task Scheduler"
 fi
 [ -d "$WA_BASE/instance" ] || abort "instance directory is missing; run install.sh first"
+resolve_tools
 
 if "$DOCKER" compose version >/dev/null 2>&1; then
   compose() { "$DOCKER" compose "$@"; }
@@ -30,9 +31,6 @@ for _ in $(seq 1 30); do
 done
 [ -n "$qr" ] || abort "pairing image was not written; the window may still be running"
 
-owner=$(stat -c '%u:%g' /volume1/docker 2>/dev/null || echo "0:0")
-install -m 0600 "$qr" "$WA_BASE/pairing-qr.png"
-chown "$owner" "$WA_BASE/pairing-qr.png"
-chmod 0600 "$WA_BASE/pairing-qr.png"
+publish_qr "$qr"
 printf 'Scan this image within 3 minutes of the container start: %s\n' "$WA_BASE/pairing-qr.png"
 printf 'Do not open pairing.payload. After the phone accepts the device, run steady.sh.\n'

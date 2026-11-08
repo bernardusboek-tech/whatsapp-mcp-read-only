@@ -10,7 +10,10 @@ if [ "${WA_ALLOW_NONROOT:-0}" != "1" ] && [ "$(id -u)" -ne 0 ]; then
   abort "run as root from DSM Task Scheduler"
 fi
 
-logs=$("$DOCKER" logs wa-readonly-2 2>&1 || true)
+resolve_tools
+if ! logs=$("$DOCKER" logs wa-readonly-2 2>&1); then
+  abort "docker logs failed; the container was left unchanged"
+fi
 if ! printf '%s\n' "$logs" | grep -q 'pairing finished'; then
   abort "pairing finished was not in the container log; left the container unchanged"
 fi
