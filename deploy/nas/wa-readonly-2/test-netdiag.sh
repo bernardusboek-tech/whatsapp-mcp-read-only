@@ -1,382 +1,271 @@
 #!/bin/bash
-# Proves the diagnostic's own deadlines. A planted environment value must not appear.
+# Two bounds: a Docker client that never reads a payload larger than the pipe,
+# and a kill that accepts only this invocation's marker and start time.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 diag=$root/net-diag.sh
 work=$(mktemp -d)
 cleanup() {
-  podman kill wa-readonly-2 >/dev/null 2>&1 || true
-  podman rm -f wa-readonly-2 >/dev/null 2>&1 || true
-  podman unshare rm -rf "$work" >/dev/null 2>&1 || rm -rf "$work" >/dev/null 2>&1 || true
+  if [ -f "$work/pids" ]; then
+    while read -r pid; do
+      [ -n "$pid" ] && kill -9 "$pid" >/dev/null 2>&1 || true
+    done < "$work/pids"
+  fi
+  rm -rf "$work"
 }
 trap cleanup EXIT
 
-mkdir -p "$work/bin"
-cat > "$work/bin/timeout" << 'EOF'
-#!/bin/sh
-printf 'TIMEOUT_CALLED\n' >> "${TIMEOUT_TRAP_LOG:?}"
-exit 99
-EOF
-chmod +x "$work/bin/timeout"
-export TIMEOUT_TRAP_LOG=$work/timeout-trap
-export PATH="$work/bin:$PATH"
-: > "$TIMEOUT_TRAP_LOG"
+python3 - "$diag" << 'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index('DIAG_TEMPLATE = r"""') + len('DIAG_TEMPLATE = r"""')
+end = text.index('\n"""', start)
+body = text[start:end]
+print("payload_bytes=%d" % len(body.encode("utf-8")))
+if len(body.encode("utf-8")) <= 4096:
+    raise SystemExit("diagnostic payload fits in one pipe page")
+PY
 
-cat > "$work/stub-docker" << 'EOF'
+python3 - << 'PY'
+import fcntl
+import os
+import signal
+
+read_fd, write_fd = os.pipe()
+fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, 4096)
+pid = os.fork()
+if pid == 0:
+    signal.signal(signal.SIGALRM, lambda *_args: os._exit(0))
+    signal.alarm(1)
+    payload = b"x" * 8192
+    sent = 0
+    try:
+        while sent < len(payload):
+            sent += os.write(write_fd, payload[sent:])
+    except InterruptedError:
+        os._exit(0)
+    os._exit(1)
+os.close(write_fd)
+_wpid, status = os.waitpid(pid, 0)
+os.close(read_fd)
+if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+    raise SystemExit("blocking write of a full pipe returned")
+print("blocking_write_blocked=yes")
+PY
+
+cat > "$work/stub" << 'EOF'
 #!/usr/bin/env python3
+import fcntl
 import os
 import subprocess
 import sys
 import time
 
-log = os.environ["STUB_LOG"]
-orphan_path = os.environ["STUB_ORPHAN"]
-mode = os.environ.get("STUB_MODE", "orphan")
+mode = os.environ["STUB_MODE"]
+state = os.environ["STUB_DIR"]
 
 
-def note(text):
-    handle = open(log, "a", encoding="ascii")
-    handle.write(text + "\n")
-    handle.close()
+def stat_start(pid):
+    raw = open("/proc/%d/stat" % pid, encoding="ascii", errors="replace").read()
+    rest = raw[raw.rfind(")") + 2 :].split()
+    return int(rest[19])
+
+
+def spawn(argv_tail):
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        os.dup2(read_fd, 0)
+        os.close(write_fd)
+        os.execv(sys.executable, [sys.executable] + argv_tail)
+    os.close(read_fd)
+    os.write(write_fd, b"import time\nwhile True:\n    time.sleep(1)\n")
+    os.close(write_fd)
+    return pid
+
+
+def alive(pid):
+    return os.path.exists("/proc/%d" % pid)
 
 
 if len(sys.argv) < 2:
     sys.exit(2)
 if sys.argv[1] == "inspect":
-    note("inspect")
-    if mode == "inspect-hang":
-        time.sleep(30)
     sys.stdout.write("true\n")
     sys.stdout.flush()
     sys.exit(0)
 if sys.argv[1] != "exec":
-    note("unexpected")
     sys.exit(2)
+
+if mode == "noread":
+    size = 0
+    deadline = time.time() + 0.5
+    while time.time() < deadline:
+        size = fcntl.fcntl(0, fcntl.F_GETPIPE_SZ)
+        if size <= 4096:
+            break
+        time.sleep(0.01)
+    handle = open(os.path.join(state, "pipe"), "w", encoding="ascii")
+    handle.write(str(size))
+    handle.close()
+    time.sleep(30)
+    sys.exit(0)
+
 data = sys.stdin.buffer.read()
 if b"wa-netdiag-kill" in data:
-    pgid = sys.argv[-1]
-    alive = os.path.exists("/proc/" + pgid)
-    note("kill alive=%s" % ("yes" if alive else "no"))
-    proc = subprocess.run([sys.executable, "-u", "-", pgid], input=data)
-    sys.exit(proc.returncode)
-note("diag")
-read_fd, write_fd = os.pipe()
-pid = os.fork()
-if pid == 0:
-    os.setsid()
-    os.close(write_fd)
-    os.dup2(read_fd, 0)
-    os.execv(sys.executable, [sys.executable, "-u", "-"])
-os.close(read_fd)
-os.write(write_fd, b"import time\nwhile True:\n    time.sleep(0.5)\n")
-os.close(write_fd)
-for _ in range(50):
-    try:
-        raw = open("/proc/%d/cmdline" % pid, "rb").read()
-    except OSError:
-        raw = b""
-    if b"-u" in raw:
-        break
-    time.sleep(0.05)
-handle = open(orphan_path, "w", encoding="ascii")
-handle.write(str(pid))
-handle.close()
-sys.stdout.write("diag_pgid=%d\n" % pid)
+    record = {}
+    for name in ("real", "decoy", "generic", "http"):
+        record[name] = open(os.path.join(state, name), encoding="ascii").read().strip()
+    marker = open(os.path.join(state, "marker"), encoding="ascii").read().strip()
+    real_pid, real_start = record["real"].split()
+    decoy_pid, decoy_start = record["decoy"].split()
+    generic_pid, generic_start = record["generic"].split()
+    http_pid, http_start = record["http"].split()
+    host_pgid, host_start, host_marker = sys.argv[-3], sys.argv[-2], sys.argv[-1]
+    log = open(os.path.join(state, "kill-log"), "w", encoding="ascii")
+
+    def attempt(pid, start, mark):
+        proc = subprocess.run(
+            [sys.executable, "-u", "-", str(pid), str(start), mark],
+            input=data,
+        )
+        return proc.returncode
+
+    checks = (
+        ("decoy", decoy_pid, decoy_start, marker),
+        ("generic", generic_pid, generic_start, marker),
+        ("http", http_pid, http_start, marker),
+        ("wrong_start", real_pid, str(int(real_start) + 1), marker),
+    )
+    for label, pid, start, mark in checks:
+        code = attempt(pid, start, mark)
+        log.write("%s=%s alive=%s\n" % (label, code, "yes" if alive(int(pid)) else "no"))
+        if code == 0 or not alive(int(pid)):
+            log.write("unexpected_kill=%s\n" % label)
+            log.close()
+            sys.exit(9)
+    if host_pgid != real_pid or host_start != real_start or host_marker != marker:
+        log.write("host_target_mismatch=yes\n")
+        log.close()
+        sys.exit(9)
+    code = attempt(host_pgid, host_start, host_marker)
+    log.write("real=%s alive=%s\n" % (code, "yes" if alive(int(real_pid)) else "no"))
+    log.close()
+    sys.exit(code)
+
+marker = sys.argv[-1]
+real = spawn(["-u", "-", marker])
+decoy = spawn(["-u", "-", "0123456789abcdef"])
+generic = spawn(["-u", "-"])
+http = spawn(["-c", "import time\nwhile True:\n    time.sleep(1)\n"])
+for pid in (real, decoy, generic, http):
+    handle = open(os.path.join(state, "pids"), "a", encoding="ascii")
+    handle.write("%d\n" % pid)
+    handle.close()
+open(os.path.join(state, "marker"), "w", encoding="ascii").write(marker)
+open(os.path.join(state, "real"), "w", encoding="ascii").write("%d %d\n" % (real, stat_start(real)))
+open(os.path.join(state, "decoy"), "w", encoding="ascii").write("%d %d\n" % (decoy, stat_start(decoy)))
+open(os.path.join(state, "generic"), "w", encoding="ascii").write("%d %d\n" % (generic, stat_start(generic)))
+open(os.path.join(state, "http"), "w", encoding="ascii").write("%d %d\n" % (http, stat_start(http)))
+sys.stdout.write("diag_pgid=%d\n" % real)
+sys.stdout.write("diag_start=%d\n" % stat_start(real))
 sys.stdout.flush()
 time.sleep(30)
 EOF
-chmod +x "$work/stub-docker"
+chmod +x "$work/stub"
 
-seconds() {
-  python3 -c 'import time; print("%.3f" % time.time())'
-}
-
-echo "=== inspect deadline ==="
-start=$(seconds)
-set +e
-STUB_LOG=$work/inspect.log STUB_ORPHAN=$work/orphan STUB_MODE=inspect-hang \
-  DOCKER=$work/stub-docker NETDIAG_INSPECT_SECONDS=1 NETDIAG_OVERALL_SECONDS=5 \
-  bash "$diag" > "$work/inspect.out"
-inspect_rc=$?
-set -e
-inspect_elapsed=$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$start" "$(seconds)")
-echo "elapsed=$inspect_elapsed exit=$inspect_rc"
-cat "$work/inspect.out"
-if [ "$inspect_rc" -ne 124 ]; then
-  echo "inspect deadline did not abort" >&2
-  exit 1
-fi
-grep -qx 'container=inspect_timeout' "$work/inspect.out"
-python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 4 else 1)' "$inspect_elapsed"
-if grep -q '^exec' "$work/inspect.log" 2>/dev/null; then
-  echo "inspect deadline still started exec" >&2
-  exit 1
-fi
-
-echo "=== orphan survives client kill ==="
-: > "$work/stub.log"
-start=$(seconds)
-set +e
-STUB_LOG=$work/stub.log STUB_ORPHAN=$work/orphan STUB_MODE=orphan \
-  DOCKER=$work/stub-docker NETDIAG_EXEC_SECONDS=2 NETDIAG_OVERALL_SECONDS=10 NETDIAG_KILL_SECONDS=3 \
-  bash "$diag" > "$work/orphan.out"
-orphan_rc=$?
-set -e
-orphan_elapsed=$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$start" "$(seconds)")
-orphan_pid=$(cat "$work/orphan")
-echo "elapsed=$orphan_elapsed exit=$orphan_rc"
-cat "$work/stub.log"
-cat "$work/orphan.out"
-if [ "$orphan_rc" -ne 124 ]; then
-  echo "orphan case did not hit the host deadline" >&2
-  exit 1
-fi
-grep -qx 'kill alive=yes' "$work/stub.log"
-grep -qx 'diag=timeout' "$work/orphan.out"
-grep -qx 'container_child=killed' "$work/orphan.out"
-if [ -d "/proc/$orphan_pid" ]; then
-  echo "orphan diagnostic child still running" >&2
-  exit 1
-fi
-echo "child_after=dead"
-python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 8 else 1)' "$orphan_elapsed"
-if grep -q 'diag_pgid=' "$work/orphan.out"; then
-  echo "process id leaked into the report" >&2
-  exit 1
-fi
-
-echo "=== container normal, phase, and host deadline ==="
-mkdir -p "$work/instance"
-printf 'synthetic-offline-fixture\n' > "$work/secret"
-chmod 700 "$work/instance"
-chmod 600 "$work/secret"
-podman unshare chown -R 65532:65532 "$work/instance" "$work/secret"
-podman kill wa-readonly-2 >/dev/null 2>&1 || true
-podman rm -f wa-readonly-2 >/dev/null 2>&1 || true
-podman run -d --name wa-readonly-2 --network none --read-only --cap-drop=ALL \
-  --security-opt=no-new-privileges \
-  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
-  -v "$work/instance:/var/lib/wa-instance" \
-  -v "$work/secret:/run/secrets/mcp-token:ro" \
-  -e WA_MCP_TRANSPORT=streamable-http -e WA_MCP_BIND=127.0.0.1 -e WA_MCP_PORT=12789 \
-  -e MCP_AUTH_TOKEN_FILE=/run/secrets/mcp-token -e WA_RUN_BRIDGE=1 -e WA_PAIR=0 \
-  -e WA_INSTANCE_DIR=/var/lib/wa-instance -e SECRET_SHOULD_NOT_PRINT=supersecretvalue \
-  localhost/wa-readonly-private:t276 >/dev/null
-ready=0
-for _ in $(seq 1 40); do
-  if podman exec wa-readonly-2 python3 -c 'import socket; s=socket.create_connection(("127.0.0.1",12789),2); s.close()' >/dev/null 2>&1; then
-    ready=1
-    break
-  fi
-  sleep 0.3
-done
-if [ "$ready" -ne 1 ]; then
-  echo "listener did not start" >&2
-  exit 1
-fi
-http_pid=$(podman exec wa-readonly-2 python3 -c 'import os
-me=str(os.getpid())
-found=[]
-needle=b"whatsapp-mcp-server/main.py"
-for name in os.listdir("/proc"):
-    if not name.isdigit() or name == me:
-        continue
-    try:
-        raw=open("/proc/"+name+"/cmdline","rb").read()
-    except OSError:
-        continue
-    if needle in raw:
-        found.append(name)
-print(",".join(sorted(found)))')
-if [ -z "$http_pid" ]; then
-  echo "http process missing before diagnostic" >&2
-  exit 1
-fi
-
-assert_http_same() {
-  current=$(podman exec wa-readonly-2 python3 -c 'import os
-me=str(os.getpid())
-found=[]
-needle=b"whatsapp-mcp-server/main.py"
-for name in os.listdir("/proc"):
-    if not name.isdigit() or name == me:
-        continue
-    try:
-        raw=open("/proc/"+name+"/cmdline","rb").read()
-    except OSError:
-        continue
-    if needle in raw:
-        found.append(name)
-print(",".join(sorted(found)))')
-  if [ "$current" != "$http_pid" ]; then
-    echo "http process changed" >&2
-    exit 1
-  fi
-  podman exec wa-readonly-2 python3 -c 'import socket; s=socket.create_connection(("127.0.0.1",12789),2); s.close()'
-}
-
-assert_clean() {
-  if grep -q 'supersecretvalue' "$1"; then
-    echo "planted environment value appeared" >&2
-    exit 1
-  fi
-  if grep -q 'diag_pgid=' "$1"; then
-    echo "process id leaked into the report" >&2
-    exit 1
-  fi
-}
-
-echo "--- normal ---"
-start=$(seconds)
-DOCKER=$(command -v podman) bash "$diag" > "$work/normal.out"
-normal_elapsed=$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$start" "$(seconds)")
-echo "elapsed=$normal_elapsed"
-cat "$work/normal.out"
-grep -qx 'WA_PAIR=0' "$work/normal.out"
-grep -qx 'http_process=yes' "$work/normal.out"
-grep -qx 'local_listener=ok' "$work/normal.out"
-grep -qx 'diag=ok' "$work/normal.out"
-grep -qx 'container_child=exited' "$work/normal.out"
-assert_clean "$work/normal.out"
-assert_http_same
-python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 12 else 1)' "$normal_elapsed"
-echo "normal_http_same=yes listener_after=yes planted_absent=yes"
-
-echo "--- phase deadline ---"
-start=$(seconds)
-DOCKER=$(command -v podman) NETDIAG_DNS_SECONDS=2 NETDIAG_EXEC_SECONDS=10 NETDIAG_OVERALL_SECONDS=16 \
-  bash "$diag" --self-test-hang > "$work/hang.out"
-hang_elapsed=$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$start" "$(seconds)")
-echo "elapsed=$hang_elapsed"
-cat "$work/hang.out"
-grep -qx 'dns=timeout' "$work/hang.out"
-grep -qx 'dns_error=deadline' "$work/hang.out"
-grep -qx 'local_listener=ok' "$work/hang.out"
-grep -qx 'diag=ok' "$work/hang.out"
-assert_clean "$work/hang.out"
-assert_http_same
-python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 8 else 1)' "$hang_elapsed"
-podman exec wa-readonly-2 python3 -c 'import os; raise SystemExit(0 if os.path.exists("/tmp/wa-netdiag-hang") else 1)'
-leftover=$(podman exec wa-readonly-2 python3 -c 'import os
-count=0
-for name in os.listdir("/proc"):
-    if not name.isdigit():
-        continue
-    try:
-        raw=open("/proc/"+name+"/cmdline","rb").read().split(bytes([0]))
-    except OSError:
-        continue
-    parts=[part for part in raw if part]
-    if len(parts) >= 3 and parts[0].rsplit(b"/",1)[-1]==b"python3" and parts[1:]==[b"-u", b"-"]:
-        count += 1
-print(count)')
-if [ "$leftover" != "0" ]; then
-  echo "phase child still running inside the container" >&2
-  exit 1
-fi
-echo "hang_marker=yes leftover_diag_process=0 http_same=yes"
-
-echo "--- host deadline inside container ---"
-start=$(seconds)
-set +e
-DOCKER=$(command -v podman) NETDIAG_EXEC_SECONDS=3 NETDIAG_OVERALL_SECONDS=12 NETDIAG_KILL_SECONDS=4 \
-  bash "$diag" --self-test-stuck > "$work/stuck.out" &
-stuck_job=$!
-set -e
-stuck_pid=""
-for _ in $(seq 1 50); do
-  if podman exec wa-readonly-2 python3 -c 'print(open("/tmp/wa-netdiag-stuck").read().strip())' > "$work/stuck-pid" 2>/dev/null; then
-    stuck_pid=$(cat "$work/stuck-pid")
-    break
-  fi
-  if ! kill -0 "$stuck_job" 2>/dev/null; then
-    break
-  fi
-  sleep 0.1
-done
-if [ -z "$stuck_pid" ]; then
-  echo "stuck diagnostic child was not visible" >&2
-  wait "$stuck_job" || true
-  cat "$work/stuck.out" >&2 || true
-  exit 1
-fi
-podman exec wa-readonly-2 python3 -c 'import os,sys; raise SystemExit(0 if os.path.exists("/proc/"+sys.argv[1]) else 1)' "$stuck_pid"
-echo "child_was_alive=yes"
-podman exec wa-readonly-2 python3 -c 'import socket; s=socket.create_connection(("127.0.0.1",12789),2); s.close()'
-echo "listener_during=yes"
-set +e
-wait "$stuck_job"
-stuck_rc=$?
-set -e
-stuck_elapsed=$(python3 -c 'import sys; print("%.3f" % (float(sys.argv[2]) - float(sys.argv[1])))' "$start" "$(seconds)")
-echo "elapsed=$stuck_elapsed exit=$stuck_rc"
-cat "$work/stuck.out"
-if [ "$stuck_rc" -ne 124 ]; then
-  echo "stuck case did not hit the host deadline" >&2
-  exit 1
-fi
-grep -qx 'diag=timeout' "$work/stuck.out"
-if ! grep -Eq '^container_child=(killed|absent)$' "$work/stuck.out"; then
-  echo "container child was not confirmed gone" >&2
-  exit 1
-fi
-assert_clean "$work/stuck.out"
-if podman exec wa-readonly-2 python3 -c 'import os,sys; raise SystemExit(0 if os.path.exists("/proc/"+sys.argv[1]) else 1)' "$stuck_pid"; then
-  echo "stuck diagnostic child still running" >&2
-  exit 1
-fi
-echo "child_after=dead"
-assert_http_same
-python3 -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 10 else 1)' "$stuck_elapsed"
-echo "stuck_http_same=yes listener_after=yes"
-
-echo "--- parent death signal ---"
-podman exec --user 65532:65532 wa-readonly-2 python3 - << 'PY'
-import ctypes
+run_bounded() {
+  local limit=$1
+  shift
+  python3 - "$limit" "$diag" "$@" << 'PY'
 import os
+import subprocess
+import sys
 import time
 
-libc = ctypes.CDLL("libc.so.6")
-ready_read, ready_write = os.pipe()
-id_read, id_write = os.pipe()
-middle = os.fork()
-if middle == 0:
-    me = os.getpid()
-    os.close(id_read)
-    os.close(ready_read)
-    child = os.fork()
-    if child == 0:
-        os.close(id_write)
-        if libc.prctl(1, 9) != 0 or os.getppid() != me:
-            os._exit(2)
-        os.write(ready_write, b"ready\n")
-        time.sleep(30)
-        os._exit(3)
-    os.close(ready_write)
-    os.read(ready_read, 8)
-    os.write(id_write, str(child).encode("ascii") + b"\n")
-    os.close(id_write)
-    os._exit(0)
-os.close(id_write)
-os.close(ready_read)
-os.close(ready_write)
-os.waitpid(middle, 0)
-child = int(os.read(id_read, 64).strip())
-deadline = time.time() + 2
-while time.time() < deadline:
-    if not os.path.exists("/proc/%d" % child):
-        os._exit(0)
+limit = float(sys.argv[1])
+diag = sys.argv[2]
+env = os.environ.copy()
+env.update(
+    {
+        "DOCKER": sys.argv[3],
+        "STUB_MODE": sys.argv[4],
+        "STUB_DIR": sys.argv[5],
+        "NETDIAG_INSPECT_SECONDS": sys.argv[6],
+        "NETDIAG_EXEC_SECONDS": sys.argv[7],
+        "NETDIAG_KILL_SECONDS": sys.argv[8],
+        "NETDIAG_OVERALL_SECONDS": sys.argv[9],
+        "PYTHONUNBUFFERED": "1",
+    }
+)
+out_path = sys.argv[10]
+started = time.monotonic()
+proc = subprocess.Popen(
+    ["bash", diag],
+    stdout=open(out_path, "w", encoding="ascii"),
+    stderr=subprocess.DEVNULL,
+    env=env,
+    start_new_session=True,
+)
+code = 99
+while time.monotonic() - started < limit:
+    if proc.poll() is not None:
+        code = proc.returncode
+        break
     time.sleep(0.05)
-os._exit(1)
+else:
+    os.killpg(proc.pid, 9)
+    proc.wait(timeout=2)
+    print("elapsed=hung")
+    raise SystemExit(1)
+print("elapsed=%.3f" % (time.monotonic() - started))
+print("exit=%d" % code)
+raise SystemExit(0 if code == 124 else 1)
 PY
-podman exec wa-readonly-2 python3 -c 'import os; raise SystemExit(0 if os.path.exists("/proc/1") else 1)'
-assert_http_same
-echo "grandchild_dead=yes pid1_alive=yes http_same=yes"
+}
 
-if [ -s "$TIMEOUT_TRAP_LOG" ]; then
-  echo "external timeout command was used" >&2
+echo "=== stdin deadline ==="
+mkdir -p "$work/noread"
+run_bounded 5 "$work/stub" noread "$work/noread" 1 1 1 4 "$work/noread.out"
+echo "pipe=$(cat "$work/noread/pipe")"
+cat "$work/noread.out"
+test "$(cat "$work/noread/pipe")" = "4096"
+grep -qx 'diag=timeout' "$work/noread.out"
+
+echo "=== invocation identity ==="
+mkdir -p "$work/id"
+run_bounded 12 "$work/stub" identity "$work/id" 1 2 4 10 "$work/id.out"
+echo "kill_log:"
+cat "$work/id/kill-log"
+echo "output:"
+cat "$work/id.out"
+grep -qx 'decoy=3 alive=yes' "$work/id/kill-log"
+grep -qx 'generic=3 alive=yes' "$work/id/kill-log"
+grep -qx 'http=3 alive=yes' "$work/id/kill-log"
+grep -qx 'wrong_start=3 alive=yes' "$work/id/kill-log"
+grep -qx 'real=0 alive=no' "$work/id/kill-log"
+grep -qx 'diag=timeout' "$work/id.out"
+grep -qx 'container_child=killed' "$work/id.out"
+marker=$(cat "$work/id/marker")
+if grep -q "$marker" "$work/id.out" || grep -q 'diag_pgid=' "$work/id.out" || grep -q 'diag_start=' "$work/id.out"; then
+  echo "identity leaked into the report" >&2
   exit 1
 fi
-echo "external_timeout_used=no"
+real=$(awk '{print $1}' "$work/id/real")
+decoy=$(awk '{print $1}' "$work/id/decoy")
+generic=$(awk '{print $1}' "$work/id/generic")
+http=$(awk '{print $1}' "$work/id/http")
+if [ -d "/proc/$real" ]; then
+  echo "matching diagnostic child still running" >&2
+  exit 1
+fi
+for pid in "$decoy" "$generic" "$http"; do
+  if [ ! -d "/proc/$pid" ]; then
+    echo "unrelated process $pid was killed" >&2
+    exit 1
+  fi
+done
+echo "marker_in_output=no unrelated_alive=yes matching_child=dead"
 echo "PASS"

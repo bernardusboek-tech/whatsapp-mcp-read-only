@@ -22,6 +22,7 @@ else
 fi
 
 exec python3 -u - "$docker_bin" "$@" << 'NETDIAG_SUPERVISOR'
+import fcntl
 import os
 import re
 import select
@@ -50,13 +51,17 @@ ALLOW = {
 }
 LINE_RE = re.compile(r"^[A-Za-z0-9_]+=[A-Za-z0-9._+-]{1,60}$")
 PGID_RE = re.compile(r"^diag_pgid=([1-9][0-9]{0,8})$")
+START_RE = re.compile(r"^diag_start=([0-9]{1,20})$")
+MARKER_RE = re.compile(r"^[0-9a-f]{16}$")
 
 KILL_SCRIPT = """# wa-netdiag-kill
 import os
 import sys
 
 pgid = int(sys.argv[1])
-if pgid <= 1:
+start = int(sys.argv[2])
+marker = sys.argv[3]
+if pgid <= 1 or len(marker) != 16 or any(char not in "0123456789abcdef" for char in marker):
     sys.exit(3)
 try:
     raw = open("/proc/%d/cmdline" % pgid, "rb").read()
@@ -66,16 +71,16 @@ except OSError:
     sys.exit(4)
 parts = [part for part in raw.split(bytes([0])) if part]
 base = parts[0].rsplit(b"/", 1)[-1] if parts else b""
-if base != b"python3" or parts[1:] != [b"-u", b"-"]:
+if base != b"python3" or parts[1:] != [b"-u", b"-", marker.encode("ascii")]:
     sys.exit(3)
 
 def fields(text):
     rest = text[text.rfind(")") + 2 :].split()
-    return int(rest[2]), int(rest[3])
+    return int(rest[2]), int(rest[3]), int(rest[19])
 
-pgrp, session = fields(leader)
-_, init_session = fields(init)
-if pgrp != pgid or session <= 0 or session == init_session:
+pgrp, session, seen = fields(leader)
+_, init_session, _ = fields(init)
+if pgrp != pgid or seen != start or session <= 0 or session == init_session:
     sys.exit(3)
 os.killpg(pgid, 9)
 """
@@ -92,8 +97,7 @@ import time
 
 HOST = "web.whatsapp.com"
 PORT = 443
-HANG = %%HANG%%
-STUCK = %%STUCK%%
+MARKER = "%%MARKER%%"
 DNS_LIMIT = %%DNS_LIMIT%%
 NET_LIMIT = %%NET_LIMIT%%
 SOCKET_LIMIT = %%SOCKET_LIMIT%%
@@ -152,7 +156,7 @@ def error_class(exc):
 def session_fields(pid):
     raw = open("/proc/%d/stat" % pid, "r", encoding="ascii", errors="replace").read()
     rest = raw[raw.rfind(")") + 2 :].split()
-    return int(rest[2]), int(rest[3])
+    return int(rest[2]), int(rest[3]), int(rest[19])
 
 
 def isolate():
@@ -164,8 +168,8 @@ def isolate():
     if os.getpgid(0) != pid or pid <= 1:
         os._exit(2)
     try:
-        pgrp, session = session_fields(pid)
-        _, init_session = session_fields(1)
+        pgrp, session, _start = session_fields(pid)
+        _, init_session, _ = session_fields(1)
     except (OSError, IndexError, ValueError):
         os._exit(2)
     if pgrp != pid or session <= 0 or session == init_session:
@@ -305,15 +309,6 @@ def class_token(text):
 
 
 def do_dns():
-    if HANG:
-        try:
-            handle = open("/tmp/wa-netdiag-hang", "w", encoding="ascii")
-            handle.write("1")
-            handle.close()
-        except OSError:
-            pass
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        time.sleep(30)
     infos = socket.getaddrinfo(HOST, PORT, type=socket.SOCK_STREAM)
     for info in infos:
         address = info[4][0]
@@ -386,21 +381,13 @@ def take_ip(result):
     return None, None
 
 
+if sys.argv[1:] != [MARKER]:
+    os._exit(2)
 pgid = isolate()
 print("diag_pgid=%d" % pgid, flush=True)
+print("diag_start=%d" % session_fields(pgid)[2], flush=True)
 signal.signal(signal.SIGALRM, on_alarm)
 signal.alarm(ALARM)
-if STUCK:
-    try:
-        handle = open("/tmp/wa-netdiag-stuck", "w", encoding="ascii")
-        handle.write(str(os.getpid()))
-        handle.close()
-    except OSError:
-        pass
-    signal.signal(signal.SIGALRM, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    time.sleep(30)
 
 emit("WA_PAIR", pair_class(os.environ.get("WA_PAIR", "")))
 emit("bridge_process", "yes" if proc_has(b"whatsapp-bridge") else "no")
@@ -504,7 +491,7 @@ def allowed(line):
     return key in ALLOW
 
 
-def launch(args, script, deadline, capture_pgid):
+def launch(args, script, deadline, capture_identity):
     proc = subprocess.Popen(
         args,
         stdin=subprocess.PIPE,
@@ -512,66 +499,106 @@ def launch(args, script, deadline, capture_pgid):
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    proc.stdin.write(script.encode("utf-8"))
-    proc.stdin.close()
-    fd = proc.stdout.fileno()
-    os.set_blocking(fd, False)
+    in_fd = proc.stdin.fileno()
+    out_fd = proc.stdout.fileno()
+    os.set_blocking(in_fd, False)
+    os.set_blocking(out_fd, False)
+    try:
+        fcntl.fcntl(in_fd, fcntl.F_SETPIPE_SZ, 4096)
+    except (AttributeError, OSError):
+        pass
+    payload = script.encode("utf-8")
+    sent = 0
+    stdin_open = True
     buf = b""
     lines = []
     pgid = None
+    start = None
     end = time.monotonic() + deadline
     overflow = False
-    while time.monotonic() < end:
-        if proc.poll() is not None:
-            break
-        ready, _, _ = select.select([fd], [], [], 0.1)
-        if not ready:
-            continue
-        try:
-            chunk = os.read(fd, 1024)
-        except BlockingIOError:
-            continue
-        if chunk == b"":
-            break
-        buf += chunk
-        if len(buf) > 4096:
-            overflow = True
-            break
-        while b"\n" in buf:
-            raw, buf = buf.split(b"\n", 1)
-            text = raw.decode("ascii", "replace").strip()
-            matched = PGID_RE.fullmatch(text) if capture_pgid and pgid is None else None
-            if matched:
+
+    def take_line(text):
+        nonlocal pgid, start
+        if capture_identity:
+            matched = PGID_RE.fullmatch(text)
+            if matched and pgid is None:
                 pgid = int(matched.group(1))
-            elif allowed(text) and len(lines) < 24:
-                lines.append(text)
-    else:
-        kill_group(proc)
-        return "timeout", proc.returncode, lines, pgid
-    if overflow or proc.poll() is None:
-        kill_group(proc)
-        return "timeout", proc.returncode, lines, pgid
-    while len(buf) <= 4096:
-        try:
-            chunk = os.read(fd, 1024)
-        except BlockingIOError:
-            break
-        if not chunk:
-            break
-        buf += chunk
-    if buf.strip():
-        text = buf.decode("ascii", "replace").strip()
-        matched = PGID_RE.fullmatch(text) if capture_pgid and pgid is None else None
-        if matched:
-            pgid = int(matched.group(1))
-        elif allowed(text) and len(lines) < 24:
+                return
+            matched = START_RE.fullmatch(text)
+            if matched and start is None:
+                start = int(matched.group(1))
+                return
+        if allowed(text) and len(lines) < 24:
             lines.append(text)
+
+    def pump_out():
+        nonlocal buf, overflow
+        while True:
+            try:
+                chunk = os.read(out_fd, 1024)
+            except BlockingIOError:
+                return
+            if chunk == b"":
+                return
+            buf += chunk
+            if len(buf) > 4096:
+                overflow = True
+                return
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                take_line(raw.decode("ascii", "replace").strip())
+
+    if not payload:
+        proc.stdin.close()
+        stdin_open = False
+    while time.monotonic() < end:
+        if overflow:
+            break
+        writing = stdin_open and sent < len(payload)
+        if proc.poll() is not None and not writing:
+            pump_out()
+            break
+        wait = max(0.0, min(0.1, end - time.monotonic()))
+        readable, writable, _ = select.select([out_fd], [in_fd] if writing else [], [], wait)
+        if writable:
+            try:
+                count = os.write(in_fd, payload[sent:])
+            except BlockingIOError:
+                count = 0
+            except BrokenPipeError:
+                stdin_open = False
+                count = 0
+            if count:
+                sent += count
+            if stdin_open and sent >= len(payload):
+                proc.stdin.close()
+                stdin_open = False
+        if readable:
+            pump_out()
+    else:
+        if stdin_open:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+        kill_group(proc)
+        return "timeout", proc.returncode, lines, pgid, start
+    if overflow or proc.poll() is None:
+        if stdin_open:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+        kill_group(proc)
+        return "timeout", proc.returncode, lines, pgid, start
+    if buf.strip():
+        take_line(buf.decode("ascii", "replace").strip())
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
         kill_group(proc)
-        return "timeout", proc.returncode, lines, pgid
-    return "ok", proc.returncode, lines, pgid
+        return "timeout", proc.returncode, lines, pgid, start
+    return "ok", proc.returncode, lines, pgid, start
 
 
 def emit_result(lines, status, child):
@@ -582,8 +609,8 @@ def emit_result(lines, status, child):
         print("container_child=" + child, flush=True)
 
 
-def container_kill(docker, pgid, deadline):
-    if pgid is None or pgid <= 1:
+def container_kill(docker, pgid, start, marker, deadline):
+    if pgid is None or start is None or pgid <= 1 or not MARKER_RE.fullmatch(marker):
         return "unidentified"
     args = [
         docker,
@@ -596,8 +623,10 @@ def container_kill(docker, pgid, deadline):
         "-u",
         "-",
         str(pgid),
+        str(start),
+        marker,
     ]
-    kind, code, _, _ = launch(args, KILL_SCRIPT, deadline, False)
+    kind, code, _, _, _ = launch(args, KILL_SCRIPT, deadline, False)
     if kind == "timeout":
         return "kill_unconfirmed"
     if code == 0:
@@ -609,9 +638,9 @@ def container_kill(docker, pgid, deadline):
     return "kill_unconfirmed"
 
 
-def diag_source():
-    hang = "True" if "--self-test-hang" in sys.argv[2:] else "False"
-    stuck = "True" if "--self-test-stuck" in sys.argv[2:] else "False"
+def diag_source(marker):
+    if not MARKER_RE.fullmatch(marker):
+        return None
     dns_limit = positive("NETDIAG_DNS_SECONDS", 3, 8)
     net_limit = positive("NETDIAG_NET_SECONDS", 6, 12)
     listen_limit = positive("NETDIAG_LISTEN_SECONDS", 2, 5)
@@ -619,8 +648,7 @@ def diag_source():
     socket_limit = 1 if net_limit <= 2 else min(3, net_limit - 1)
     alarm = max(1, exec_limit - 1)
     script = DIAG_TEMPLATE
-    script = script.replace("%%HANG%%", hang)
-    script = script.replace("%%STUCK%%", stuck)
+    script = script.replace("%%MARKER%%", marker)
     script = script.replace("%%DNS_LIMIT%%", str(dns_limit))
     script = script.replace("%%NET_LIMIT%%", str(net_limit))
     script = script.replace("%%SOCKET_LIMIT%%", str(socket_limit))
@@ -687,14 +715,11 @@ def capture_plain(args, deadline):
 
 
 def main2():
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("usage=invalid", flush=True)
-        return 2
-    mode = sys.argv[2] if len(sys.argv) == 3 else ""
-    if mode not in ("", "--self-test-hang", "--self-test-stuck"):
+    if len(sys.argv) != 2:
         print("usage=invalid", flush=True)
         return 2
     docker = sys.argv[1]
+    marker = os.urandom(8).hex()
     started = time.monotonic()
     overall = positive("NETDIAG_OVERALL_SECONDS", 26, 30)
     inspect_limit = positive("NETDIAG_INSPECT_SECONDS", 5, 10)
@@ -725,7 +750,7 @@ def main2():
         print("container=not_running", flush=True)
         return 1
 
-    script = diag_source()
+    script = diag_source(marker)
     if script is None:
         print("diag=failed", flush=True)
         return 1
@@ -744,11 +769,16 @@ def main2():
         "python3",
         "-u",
         "-",
+        marker,
     ]
-    kind, code, lines, pgid = launch(args, script, budget, True)
+    kind, code, lines, pgid, start = launch(args, script, budget, True)
     if kind == "timeout" or code == 124:
         child_budget = clip(kill_limit)
-        child = container_kill(docker, pgid, child_budget) if child_budget else "kill_unconfirmed"
+        child = (
+            container_kill(docker, pgid, start, marker, child_budget)
+            if child_budget
+            else "kill_unconfirmed"
+        )
         emit_result(lines, "timeout", child)
         return 124
     if code == 2:
@@ -756,7 +786,11 @@ def main2():
         return 2
     if code != 0:
         child_budget = clip(kill_limit)
-        child = container_kill(docker, pgid, child_budget) if child_budget and pgid else ""
+        child = (
+            container_kill(docker, pgid, start, marker, child_budget)
+            if child_budget and pgid and start is not None
+            else ""
+        )
         emit_result(lines, "failed", child)
         return 1
     emit_result(lines, "ok", "exited")
