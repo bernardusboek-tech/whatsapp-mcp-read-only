@@ -31,6 +31,7 @@ type fakeClient struct {
 	connects    int
 	disconnects int
 	downloads   int
+	downloaded  whatsmeow.DownloadableMessage
 	connected   bool
 	pair        func() (<-chan PairEvent, error)
 }
@@ -48,8 +49,9 @@ func (f *fakeClient) Disconnect() {
 	f.connected = false
 }
 func (f *fakeClient) IsConnected() bool { return f.connected }
-func (f *fakeClient) Download(whatsmeow.DownloadableMessage) ([]byte, error) {
+func (f *fakeClient) Download(msg whatsmeow.DownloadableMessage) ([]byte, error) {
 	f.downloads++
+	f.downloaded = msg
 	return []byte("synthetic-media-bytes"), nil
 }
 func (f *fakeClient) GroupName(types.JID) (string, error) { return "Synthetic Group", nil }
@@ -382,7 +384,7 @@ func TestSendRouteIsAbsentAndDownloadStaysInside(t *testing.T) {
 	if err := running.store.StoreChat(chat, "Synthetic", time.Unix(1700000000, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if err := running.store.StoreMessage("med1", chat, "15550003333", "", time.Unix(1700000000, 0), false, "document", "../../escape.txt", "https://example.test/file.enc", []byte("key-bytes"), []byte("sha-bytes"), []byte("enc-bytes"), 4); err != nil {
+	if err := running.store.StoreMessage("med1", chat, "15550003333", "", time.Unix(1700000000, 0), false, "document", "../../escape.txt", "https://mmg.whatsapp.net/v/t62.7118-24/synthetic.enc", []byte("key-bytes"), []byte("sha-bytes"), []byte("enc-bytes"), 4); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"message_id":"med1","chat_jid":"` + chat + `"}`
@@ -408,5 +410,52 @@ func TestSendRouteIsAbsentAndDownloadStaysInside(t *testing.T) {
 	}
 	if strings.Contains(log.text(), "escape.txt") || strings.Contains(log.text(), bearer) {
 		t.Fatalf("log leaked download detail: %s", log.text())
+	}
+}
+
+func TestDownloadDropsSenderURL(t *testing.T) {
+	store := openTempStore(t)
+	chat := "15550004444@s.whatsapp.net"
+	if err := store.StoreChat(chat, "Synthetic", time.Unix(1700000000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	mediaDir := t.TempDir()
+	fake := &fakeClient{connected: true}
+	key, sha, enc := []byte("key-bytes"), []byte("sha-bytes"), []byte("enc-bytes")
+	rejected := []struct {
+		id, url string
+		length  uint64
+	}{
+		{"internal", "http://127.0.0.1/latest/meta-data", 4},
+		{"dots", "https://mmg.whatsapp.net/v/../../metadata", 4},
+		{"scheme", "https://evil.net/http://10.0.0.1/x", 4},
+		{"huge", "https://mmg.whatsapp.net/v/t62.7118-24/ok", maxMediaBytes + 1},
+	}
+	for _, tc := range rejected {
+		if err := store.StoreMessage(tc.id, chat, "15550004444", "", time.Unix(1700000000, 0), false, "image", tc.id+".jpg", tc.url, key, sha, enc, tc.length); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, _, err := downloadMedia(fake, store, mediaDir, tc.id, chat); err == nil {
+			t.Fatalf("%s was downloaded", tc.id)
+		}
+	}
+	if fake.downloads != 0 {
+		t.Fatalf("downloads = %d", fake.downloads)
+	}
+	const raw = "https://mmg.whatsapp.net/v/t62.7118-24/synthetic.enc?x=1"
+	if err := store.StoreMessage("ok", chat, "15550004444", "", time.Unix(1700000000, 0), false, "image", "ok.jpg", raw, key, sha, enc, 4); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := downloadMedia(fake, store, mediaDir, "ok", chat); err != nil {
+		t.Fatal(err)
+	}
+	if fake.downloads != 1 {
+		t.Fatalf("downloads = %d", fake.downloads)
+	}
+	if fake.downloaded.GetDirectPath() != "/v/t62.7118-24/synthetic.enc" {
+		t.Fatalf("direct path = %q", fake.downloaded.GetDirectPath())
+	}
+	if withURL, ok := fake.downloaded.(interface{ GetURL() string }); ok && withURL.GetURL() != "" {
+		t.Fatalf("url = %q", withURL.GetURL())
 	}
 }

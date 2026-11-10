@@ -25,9 +25,10 @@ type downloadResponse struct {
 	Path     string `json:"path,omitempty"`
 }
 
+const maxMediaBytes = 100 << 20
+
 // MediaDownloader implements whatsmeow.DownloadableMessage for rows already stored.
 type MediaDownloader struct {
-	URL           string
 	DirectPath    string
 	MediaKey      []byte
 	FileLength    uint64
@@ -37,7 +38,6 @@ type MediaDownloader struct {
 }
 
 func (d *MediaDownloader) GetDirectPath() string             { return d.DirectPath }
-func (d *MediaDownloader) GetURL() string                    { return d.URL }
 func (d *MediaDownloader) GetMediaKey() []byte               { return d.MediaKey }
 func (d *MediaDownloader) GetFileLength() uint64             { return d.FileLength }
 func (d *MediaDownloader) GetFileSHA256() []byte             { return d.FileSHA256 }
@@ -117,6 +117,13 @@ func downloadMedia(client BridgeClient, store *MessageStore, mediaDir, messageID
 	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
 		return false, "", "", "", fmt.Errorf("incomplete media information")
 	}
+	if fileLength > maxMediaBytes {
+		return false, "", "", "", fmt.Errorf("media exceeds size cap")
+	}
+	directPath := extractDirectPathFromURL(url)
+	if !strings.HasPrefix(directPath, "/") || strings.Contains(directPath, "://") || strings.Contains(directPath, "..") {
+		return false, "", "", "", fmt.Errorf("media path rejected")
+	}
 	if client == nil || !client.IsConnected() {
 		return false, "", "", "", fmt.Errorf("not connected")
 	}
@@ -134,8 +141,7 @@ func downloadMedia(client BridgeClient, store *MessageStore, mediaDir, messageID
 		return false, "", "", "", fmt.Errorf("unsupported media type")
 	}
 	data, err := client.Download(&MediaDownloader{
-		URL:           url,
-		DirectPath:    extractDirectPathFromURL(url),
+		DirectPath:    directPath,
 		MediaKey:      mediaKey,
 		FileLength:    fileLength,
 		FileSHA256:    fileSHA256,
