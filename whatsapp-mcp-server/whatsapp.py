@@ -123,6 +123,13 @@ _LAST_MESSAGE_JOIN = """
     AND chats.last_message_time = messages.timestamp
 """
 
+def _clamp(value: int, low: int, high: int) -> int:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    return value
+
 def _query_chats(
     cursor: sqlite3.Cursor,
     where: str,
@@ -130,7 +137,7 @@ def _query_chats(
     include_last_message: bool = True,
     order_by: str = "",
     limit: Optional[int] = None,
-    offset: int = 0,
+    page: int = 0,
 ) -> List[Dict[str, Any]]:
     parts = [_CHAT_SELECT]
     if include_last_message:
@@ -141,8 +148,9 @@ def _query_chats(
         parts.append("ORDER BY " + order_by)
     query_params = list(params)
     if limit is not None:
+        limit = _clamp(limit, 1, 100)
         parts.append("LIMIT ? OFFSET ?")
-        query_params.extend([limit, offset])
+        query_params.extend([limit, page * limit])
     cursor.execute(" ".join(parts), tuple(query_params))
     chats = []
     for row in cursor.fetchall():
@@ -211,6 +219,7 @@ def list_messages(
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
+        limit = _clamp(limit, 1, 100)
         offset = page * limit
         query_parts.append("ORDER BY messages.timestamp DESC")
         query_parts.append("LIMIT ? OFFSET ?")
@@ -252,6 +261,8 @@ def get_message_context(
     after: int = 5
 ) -> Dict[str, Any]:
     """Get context around a specific message."""
+    before = _clamp(before, 0, 20)
+    after = _clamp(after, 0, 20)
     with connect_ro() as conn:
         cursor = conn.cursor()
 
@@ -353,7 +364,7 @@ def list_chats(
             include_last_message=include_last_message,
             order_by=order_by,
             limit=limit,
-            offset=page * limit,
+            page=page,
         )
 
 
@@ -412,7 +423,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
             [*chat_params, *sender_params],
             order_by="chats.last_message_time DESC",
             limit=limit,
-            offset=page * limit,
+            page=page,
         )
 
 
