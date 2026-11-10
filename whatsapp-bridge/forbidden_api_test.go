@@ -15,19 +15,20 @@ import (
 // message, mark it read, or publish available presence. The pinned library
 // still contains these methods. This test only checks the application files.
 var forbiddenSelectors = map[string]bool{
-	"SendMessage":             true,
-	"Upload":                  true,
-	"MarkRead":                true,
-	"SendPresence":            true,
-	"SendChatPresence":        true,
-	"PairPhone":               true,
-	"Logout":                  true,
-	"BuildHistorySyncRequest": true,
-	"BuildEdit":               true,
-	"BuildReaction":           true,
-	"BuildRevoke":             true,
-	"SendAppState":            true,
-	"ListenAndServe":          true,
+	"SendMessage":                    true,
+	"Upload":                         true,
+	"MarkRead":                       true,
+	"SendPresence":                   true,
+	"SetForceActiveDeliveryReceipts": true,
+	"SendChatPresence":               true,
+	"PairPhone":                      true,
+	"Logout":                         true,
+	"BuildHistorySyncRequest":        true,
+	"BuildEdit":                      true,
+	"BuildReaction":                  true,
+	"BuildRevoke":                    true,
+	"SendAppState":                   true,
+	"ListenAndServe":                 true,
 }
 
 func TestApplicationDoesNotCallSendAPIs(t *testing.T) {
