@@ -1,0 +1,42 @@
+# Operator example only. Replace placeholders locally. Do not commit real paths,
+# hostnames, addresses, or tokens. Do not attach the host network, the Docker
+# socket, or a privileged profile. The published port is loopback-only.
+
+services:
+  whatsapp-readonly:
+    image: wa-readonly-candidate:local
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    user: "65532:65532"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:12789:12789"
+    volumes:
+      - type: volume
+        source: wa_instance_placeholder
+        target: /var/lib/wa-instance
+      - type: bind
+        source: /absolute/path/to/mcp-token-file
+        target: /run/secrets/mcp-token
+        read_only: true
+    environment:
+      WA_INSTANCE_DIR: /var/lib/wa-instance
+      WA_MCP_TRANSPORT: streamable-http
+      WA_MCP_BIND: 127.0.0.1
+      WA_MCP_PORT: "12789"
+      MCP_AUTH_TOKEN_FILE: /run/secrets/mcp-token
+      WA_RUN_BRIDGE: "0"
+      WA_PAIR: "0"
+    restart: "no"
+
+volumes:
+  wa_instance_placeholder:

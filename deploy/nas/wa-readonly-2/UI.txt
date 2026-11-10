@@ -1,0 +1,33 @@
+DSM only, after uploading this folder and the image archive to /volume1/docker/wa-readonly-2-install.
+Do not upload into wa-readonly-2. That directory must be absent until install.sh creates it.
+Do not enable SSH for this. Task Scheduler can run the scripts as root.
+
+1. Control Panel, Task Scheduler, Create, Triggered Task, User-defined script. Run as root.
+2. First task, only while the phone stays in your pocket:
+   bash /volume1/docker/wa-readonly-2-install/install.sh /volume1/docker/wa-readonly-2-install/wa-readonly-private-t276.docker.tar.gz
+   A conflict stops the script before it changes an existing container, network, or port 443.
+   The token is created on the NAS as mode 0600. It is not printed.
+3. When the phone is in hand, run a second task:
+   bash /volume1/docker/wa-readonly-2-install/pair.sh
+   File Station, logged in as DSM user boekbe, open /volume1/docker/wa-readonly-2/pairing-qr.png and scan that image.
+   That copy is mode 0600 and owned by boekbe. The instance directory and the token stay unreadable to boekbe.
+   Do not open pairing.payload. The text is not a picture the phone can scan.
+   The window is three minutes from the container start.
+4. After the phone accepts the linked device, run:
+   bash /volume1/docker/wa-readonly-2-install/steady.sh
+Run net-diag.sh first, against the container that is already up. It does not recreate it or change Serve.
+  bash /volume1/docker/wa-readonly-2-install/net-diag.sh
+Do not run upgrade.sh until that output is saved. Upgrade now accepts the existing 44443 route and does not remove it.
+To replace only the running image after t276, without deleting the instance directory or the token:
+  bash /volume1/docker/wa-readonly-2-install/upgrade.sh /volume1/docker/wa-readonly-2-install/wa-readonly-private-t277.docker.tar.gz
+That recreate leaves pairing off. Run pair.sh only when the phone is in hand.
+If the QR image is still absent, read the container log line that begins bridge_not_started class=.
+5. The parent registers Mail separately at https://nas-2021.tailba1801.ts.net:44443/mcp
+   The bearer is the NAS file /volume1/docker/wa-readonly-2/mcp-token. Do not send that file.
+
+Rollback, root task, leaves port 443 as it is:
+  bash /volume1/docker/wa-readonly-2-install/rollback.sh
+  Add --remove-data only to delete the new directory.
+
+Container Manager does not show a reliable exit code. PID limits are not set: this DSM kernel does not enforce them, so this project does not claim a PID limit. No CPU quota is set.
+The existing WhatsApp app connector, the website, Funnel on 443, and the synthetic directory are not used by these scripts.

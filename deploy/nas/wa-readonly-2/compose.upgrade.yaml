@@ -1,0 +1,7 @@
+# Pairing stays off. The image comes from image.override.yaml, not from this file.
+
+services:
+  whatsapp-readonly:
+    environment:
+      WA_PAIR: "0"
+    restart: "no"
