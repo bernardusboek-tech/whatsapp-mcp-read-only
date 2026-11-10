@@ -78,11 +78,6 @@ class Chat:
     last_sender: Optional[str] = None
     last_is_from_me: Optional[bool] = None
 
-    @property
-    def is_group(self) -> bool:
-        """Determine if chat is a group based on JID pattern."""
-        return self.jid.endswith("@g.us")
-
 @dataclass
 class Contact:
     phone_number: str
@@ -176,14 +171,12 @@ def list_messages(
     """Get messages matching the specified criteria with optional context."""
     with connect_ro() as conn:
         cursor = conn.cursor()
-        
-        # Build base query
+
         query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
         params = []
-        
-        # Add filters
+
         if after:
             try:
                 after = datetime.fromisoformat(after)
@@ -217,8 +210,7 @@ def list_messages(
             
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
-        # Add pagination
+
         offset = page * limit
         query_parts.append("ORDER BY messages.timestamp DESC")
         query_parts.append("LIMIT ? OFFSET ?")
@@ -262,8 +254,7 @@ def get_message_context(
     """Get context around a specific message."""
     with connect_ro() as conn:
         cursor = conn.cursor()
-        
-        # Get the target message first
+
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
             FROM messages
@@ -285,8 +276,7 @@ def get_message_context(
             id=msg_data[6],
             media_type=msg_data[8]
         )
-        
-        # Get messages before
+
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages
@@ -311,7 +301,6 @@ def get_message_context(
         # DESC LIMIT keeps the nearest rows; context is read oldest-first.
         before_messages.reverse()
 
-        # Get messages after
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages

@@ -123,7 +123,7 @@ This application consists of two main components:
 
 ## Usage
 
-Once connected, you can interact with your WhatsApp contacts through Claude, leveraging Claude's AI capabilities in your WhatsApp conversations.
+Once connected, you can read WhatsApp contacts, chats, and messages through Claude.
 
 ### MCP Tools
 
@@ -145,7 +145,7 @@ The MCP server supports downloading media files from your chats:
 
 #### Media Downloading
 
-By default, just the metadata of the media is stored in the local database. The message will indicate that media was sent. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid` (which are shown when printing messages containing the meda), this downloads the media and then returns the file path which can be then opened or passed to another tool.
+By default, just the metadata of the media is stored in the local database. A listed message includes the media type, message id, and chat JID. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid`. This downloads the media and then returns the file path which can be then opened or passed to another tool.
 
 ## Technical Details
 
@@ -157,7 +157,7 @@ By default, just the metadata of the media is stored in the local database. The 
 ## Troubleshooting
 
 - If you encounter permission issues when running uv, you may need to add it to your PATH or use the full path to the executable.
-- Make sure both the Go application and the Python server are running for the integration to work properly.
+- The Go bridge must be running. The Python server is started by the MCP client.
 
 ### Authentication Issues
 
