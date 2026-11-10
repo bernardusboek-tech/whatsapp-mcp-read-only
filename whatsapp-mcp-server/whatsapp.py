@@ -107,6 +107,60 @@ def _json_ready(value: Any) -> Any:
         return {key: _json_ready(item) for key, item in value.items()}
     return value
 
+def _match_phone_or_jid(column: str, value: str) -> tuple[str, list[str]]:
+    # Callers pass a bare number or a JID; rows store either form.
+    phone = value.split("@", 1)[0]
+    return f"({column} = ? OR {column} LIKE ?)", [value, f"%{phone}%"]
+
+_CHAT_SELECT = """
+    SELECT
+        chats.jid,
+        chats.name,
+        chats.last_message_time,
+        messages.content as last_message,
+        messages.sender as last_sender,
+        messages.is_from_me as last_is_from_me
+    FROM chats
+"""
+
+_LAST_MESSAGE_JOIN = """
+    LEFT JOIN messages ON chats.jid = messages.chat_jid
+    AND chats.last_message_time = messages.timestamp
+"""
+
+def _query_chats(
+    cursor: sqlite3.Cursor,
+    where: str,
+    params: List[Any],
+    include_last_message: bool = True,
+    order_by: str = "",
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    parts = [_CHAT_SELECT]
+    if include_last_message:
+        parts.append(_LAST_MESSAGE_JOIN)
+    if where:
+        parts.append("WHERE " + where)
+    if order_by:
+        parts.append("ORDER BY " + order_by)
+    query_params = list(params)
+    if limit is not None:
+        parts.append("LIMIT ? OFFSET ?")
+        query_params.extend([limit, offset])
+    cursor.execute(" ".join(parts), tuple(query_params))
+    chats = []
+    for row in cursor.fetchall():
+        chats.append(Chat(
+            jid=row[0],
+            name=row[1],
+            last_message_time=datetime.fromisoformat(row[2]) if row[2] else None,
+            last_message=row[3],
+            last_sender=row[4],
+            last_is_from_me=row[5],
+        ))
+    return _json_ready(chats)
+
 def list_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
@@ -149,8 +203,9 @@ def list_messages(
             params.append(before)
 
         if sender_phone_number:
-            where_clauses.append("messages.sender = ?")
-            params.append(sender_phone_number)
+            clause, clause_params = _match_phone_or_jid("messages.sender", sender_phone_number)
+            where_clauses.append(clause)
+            params.extend(clause_params)
             
         if chat_jid:
             where_clauses.append("messages.chat_jid = ?")
@@ -253,7 +308,9 @@ def get_message_context(
                 id=msg[6],
                 media_type=msg[7]
             ))
-        
+        # DESC LIMIT keeps the nearest rows; context is read oldest-first.
+        before_messages.reverse()
+
         # Get messages after
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
@@ -292,86 +349,46 @@ def list_chats(
     sort_by: str = "last_active"
 ) -> List[Dict[str, Any]]:
     """Get chats matching the specified criteria."""
+    where = ""
+    params: List[Any] = []
+    if query:
+        clause, clause_params = _match_phone_or_jid("chats.jid", query)
+        where = f"(LOWER(chats.name) LIKE LOWER(?) OR {clause})"
+        params = [f"%{query}%", *clause_params]
+    order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
     with connect_ro() as conn:
-        cursor = conn.cursor()
-        
-        # Build base query
-        query_parts = ["""
-            SELECT 
-                chats.jid,
-                chats.name,
-                chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
-            FROM chats
-        """]
-        
-        if include_last_message:
-            query_parts.append("""
-                LEFT JOIN messages ON chats.jid = messages.chat_jid 
-                AND chats.last_message_time = messages.timestamp
-            """)
-            
-        where_clauses = []
-        params = []
-        
-        if query:
-            where_clauses.append("(LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
-            params.extend([f"%{query}%", f"%{query}%"])
-            
-        if where_clauses:
-            query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
-        # Add sorting
-        order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
-        query_parts.append(f"ORDER BY {order_by}")
-        
-        # Add pagination
-        offset = (page ) * limit
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-        
-        cursor.execute(" ".join(query_parts), tuple(params))
-        chats = cursor.fetchall()
-        
-        result = []
-        for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5]
-            )
-            result.append(chat)
-
-        return _json_ready(result)
+        return _query_chats(
+            conn.cursor(),
+            where,
+            params,
+            include_last_message=include_last_message,
+            order_by=order_by,
+            limit=limit,
+            offset=page * limit,
+        )
 
 
 def search_contacts(query: str) -> List[Dict[str, Any]]:
     """Search contacts by name or phone number."""
+    clause, clause_params = _match_phone_or_jid("jid", query)
     with connect_ro() as conn:
         cursor = conn.cursor()
-        
-        # Split query into characters to support partial matching
-        search_pattern = '%' +query + '%'
-        
-        cursor.execute("""
-            SELECT DISTINCT 
+        cursor.execute(
+            f"""
+            SELECT DISTINCT
                 jid,
                 name
             FROM chats
-            WHERE 
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+            WHERE
+                (LOWER(name) LIKE LOWER(?) OR {clause})
                 AND jid NOT LIKE '%@g.us'
             ORDER BY name, jid
             LIMIT 50
-        """, (search_pattern, search_pattern))
-        
+            """,
+            (f"%{query}%", *clause_params),
+        )
         contacts = cursor.fetchall()
-        
+
         result = []
         for contact_data in contacts:
             contact = Contact(
@@ -386,54 +403,39 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
     """Get all chats involving the contact.
-    
+
     Args:
         jid: The contact's JID to search for
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
+    chat_clause, chat_params = _match_phone_or_jid("chats.jid", jid)
+    sender_clause, sender_params = _match_phone_or_jid("sender", jid)
+    # Last-message join is one row; a contact may have spoken earlier than that.
+    where = (
+        f"{chat_clause} OR chats.jid IN "
+        f"(SELECT chat_jid FROM messages WHERE {sender_clause})"
+    )
     with connect_ro() as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT DISTINCT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-            JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
-            ORDER BY c.last_message_time DESC
-            LIMIT ? OFFSET ?
-        """, (jid, jid, limit, page * limit))
-        
-        chats = cursor.fetchall()
-        
-        result = []
-        for chat_data in chats:
-            chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_is_from_me=chat_data[5]
-            )
-            result.append(chat)
-
-        return _json_ready(result)
+        return _query_chats(
+            conn.cursor(),
+            where,
+            [*chat_params, *sender_params],
+            order_by="chats.last_message_time DESC",
+            limit=limit,
+            offset=page * limit,
+        )
 
 
 def get_last_interaction(jid: str) -> Optional[Dict[str, Any]]:
     """Get most recent message involving the contact."""
+    sender_clause, sender_params = _match_phone_or_jid("m.sender", jid)
+    chat_clause, chat_params = _match_phone_or_jid("c.jid", jid)
     with connect_ro() as conn:
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT 
+        cursor.execute(
+            f"""
+            SELECT
                 m.timestamp,
                 m.sender,
                 c.name,
@@ -444,17 +446,18 @@ def get_last_interaction(jid: str) -> Optional[Dict[str, Any]]:
                 m.media_type
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE {sender_clause} OR {chat_clause}
             ORDER BY m.timestamp DESC
             LIMIT 1
-        """, (jid, jid))
-        
+            """,
+            (*sender_params, *chat_params),
+        )
         msg_data = cursor.fetchone()
-        
+
         if not msg_data:
             return None
-            
-        message = Message(
+
+        return _json_ready(Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
             sender=msg_data[1],
             chat_name=msg_data[2],
@@ -463,85 +466,34 @@ def get_last_interaction(jid: str) -> Optional[Dict[str, Any]]:
             chat_jid=msg_data[5],
             id=msg_data[6],
             media_type=msg_data[7]
-        )
-        
-        return _json_ready(message)
-        
+        ))
+
 
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Dict[str, Any]]:
     """Get chat metadata by JID."""
     with connect_ro() as conn:
-        cursor = conn.cursor()
-        
-        query = """
-            SELECT 
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-        """
-        
-        if include_last_message:
-            query += """
-                LEFT JOIN messages m ON c.jid = m.chat_jid 
-                AND c.last_message_time = m.timestamp
-            """
-            
-        query += " WHERE c.jid = ?"
-        
-        cursor.execute(query, (chat_jid,))
-        chat_data = cursor.fetchone()
-        
-        if not chat_data:
-            return None
-            
-        return _json_ready(Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5]
-        ))
+        rows = _query_chats(
+            conn.cursor(),
+            "chats.jid = ?",
+            [chat_jid],
+            include_last_message=include_last_message,
+            limit=1,
+        )
+    return rows[0] if rows else None
 
 
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, Any]]:
     """Get chat metadata by sender phone number."""
+    clause, params = _match_phone_or_jid("chats.jid", sender_phone_number)
     with connect_ro() as conn:
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT 
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid 
-                AND c.last_message_time = m.timestamp
-            WHERE c.jid LIKE ? AND c.jid NOT LIKE '%@g.us'
-            LIMIT 1
-        """, (f"%{sender_phone_number}%",))
-        
-        chat_data = cursor.fetchone()
-        
-        if not chat_data:
-            return None
-            
-        return _json_ready(Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
-            last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-            last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_is_from_me=chat_data[5]
-        ))
-        
+        rows = _query_chats(
+            conn.cursor(),
+            f"{clause} AND chats.jid NOT LIKE '%@g.us'",
+            params,
+            limit=1,
+        )
+    return rows[0] if rows else None
+
 
 class _UnixHTTPConnection(HTTPConnection):
     """HTTP over a Unix socket. This process does not open a TCP connection."""
