@@ -121,6 +121,47 @@ func TestStoresAreSeparate(t *testing.T) {
 	}
 }
 
+func TestStoreChatKeepsNewerLastMessageTime(t *testing.T) {
+	store := openTempStore(t)
+	jid := "15550005555@s.whatsapp.net"
+	newer := time.Unix(1700000100, 0)
+	older := time.Unix(1700000000, 0)
+	if err := store.StoreChat(jid, "Live Name", newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreChat(jid, "History Name", older); err != nil {
+		t.Fatal(err)
+	}
+	name, last := chatRow(t, store, jid)
+	if name != "History Name" {
+		t.Fatalf("name = %q", name)
+	}
+	if !last.Equal(newer) {
+		t.Fatalf("last_message_time = %s", last)
+	}
+	latest := time.Unix(1700000200, 0)
+	if err := store.StoreChat(jid, "Live Name", latest); err != nil {
+		t.Fatal(err)
+	}
+	name, last = chatRow(t, store, jid)
+	if name != "Live Name" {
+		t.Fatalf("name = %q", name)
+	}
+	if !last.Equal(latest) {
+		t.Fatalf("last_message_time = %s", last)
+	}
+}
+
+func chatRow(t *testing.T, store *MessageStore, jid string) (string, time.Time) {
+	t.Helper()
+	var name string
+	var last time.Time
+	if err := store.db.QueryRow("SELECT name, last_message_time FROM chats WHERE jid = ?", jid).Scan(&name, &last); err != nil {
+		t.Fatal(err)
+	}
+	return name, last
+}
+
 func openTempStore(t *testing.T) *MessageStore {
 	t.Helper()
 	store, err := OpenMessageStore(filepath.Join(t.TempDir(), "messages.db"))

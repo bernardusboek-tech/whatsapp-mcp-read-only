@@ -143,6 +143,6 @@ func sqliteDSN(path string) (string, error) {
 	if strings.ContainsAny(path, "?\x00") {
 		return "", fmt.Errorf("database path contains unsupported characters")
 	}
-	u := url.URL{Scheme: "file", Path: path, RawQuery: "_foreign_keys=on", OmitHost: true}
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "_foreign_keys=on&_journal_mode=WAL", OmitHost: true}
 	return u.String(), nil
 }
