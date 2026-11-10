@@ -1,4 +1,5 @@
 import ast
+import io
 import json
 import os
 import sqlite3
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import whatsapp
@@ -118,20 +120,19 @@ class ReadOnlyMCPTests(unittest.TestCase):
         left_db = write_db(left, [rows[0]])
         right_db = write_db(right, [rows[1]])
         self.use(left, left_db)
-        found = whatsapp.list_messages(include_context=False)
+        found = json.dumps(whatsapp.list_messages(include_context=False))
         self.assertIn("synthetic-fixture-alpha", found)
         self.assertNotIn("synthetic-fixture-beta", found)
         self.use(right, right_db)
-        found = whatsapp.list_messages(include_context=False)
+        found = json.dumps(whatsapp.list_messages(include_context=False))
         self.assertIn("synthetic-fixture-beta", found)
         self.assertNotIn("synthetic-fixture-alpha", found)
         self.use(left, left_db)
-        conn = whatsapp.connect_ro()
-        with self.assertRaises(sqlite3.OperationalError):
-            conn.execute(
-                "INSERT INTO chats (jid, name, last_message_time) VALUES ('x', 'y', '2024-01-02T03:04:05')"
-            )
-        conn.close()
+        with whatsapp.connect_ro() as conn:
+            with self.assertRaises(sqlite3.OperationalError):
+                conn.execute(
+                    "INSERT INTO chats (jid, name, last_message_time) VALUES ('x', 'y', '2024-01-02T03:04:05')"
+                )
 
     def test_missing_or_denied_paths_fail_closed(self):
         os.environ["WA_INSTANCE_DIR"] = "relative/instance"
@@ -142,7 +143,8 @@ class ReadOnlyMCPTests(unittest.TestCase):
         missing.mkdir(mode=0o700)
         self.use(missing, missing / "messages.db")
         with self.assertRaises(sqlite3.OperationalError):
-            whatsapp.connect_ro()
+            with whatsapp.connect_ro():
+                pass
         rows = load_fixture()
         db = write_db(self.base / "real", [rows[0]])
         self.use(db.parent, db)
@@ -216,6 +218,63 @@ class ReadOnlyMCPTests(unittest.TestCase):
         self.assertIn(b"POST /api/download HTTP/1.1", request)
         self.assertNotIn(b"/api/send", request)
         self.assertNotIn(b"synthetic-fixture-alpha", request)
+
+    def test_tool_results_are_json(self):
+        import main
+
+        rows = load_fixture()
+        directory = self.base / "json"
+        db = write_db(directory, rows)
+        self.use(directory, db)
+        jid = rows[0]["jid"]
+        message_id = rows[0]["message_id"]
+        cases = {
+            "search_contacts": [lambda: main.search_contacts("Synthetic")],
+            "list_messages": [
+                lambda: main.list_messages(include_context=False, limit=5),
+                lambda: main.list_messages(include_context=True, limit=5, context_before=1, context_after=1),
+            ],
+            "list_chats": [lambda: main.list_chats()],
+            "get_chat": [
+                lambda: main.get_chat(jid),
+                lambda: main.get_chat("missing@s.whatsapp.net"),
+            ],
+            "get_direct_chat_by_contact": [
+                lambda: main.get_direct_chat_by_contact("15550001111"),
+                lambda: main.get_direct_chat_by_contact("000"),
+            ],
+            "get_contact_chats": [lambda: main.get_contact_chats(jid)],
+            "get_last_interaction": [
+                lambda: main.get_last_interaction(jid),
+                lambda: main.get_last_interaction("missing@s.whatsapp.net"),
+            ],
+            "get_message_context": [lambda: main.get_message_context(message_id, before=1, after=1)],
+            "download_media": [lambda: main.download_media(message_id, jid)],
+        }
+        tools = {tool.name: tool for tool in main.mcp._tool_manager.list_tools()}
+        self.assertEqual(set(cases), set(tools))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            for name, calls in cases.items():
+                tool = tools[name]
+                self.assertIsNotNone(tool.output_schema, name)
+                for call in calls:
+                    result = call()
+                    json.dumps(result)
+                    tool.fn_metadata.convert_result(result)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_database_errors_raise(self):
+        directory = self.base / "not-a-database"
+        directory.mkdir(mode=0o700)
+        db = directory / "messages.db"
+        db.write_text("not a database", encoding="utf-8")
+        os.chmod(db, 0o600)
+        self.use(directory, db)
+        with self.assertRaises(sqlite3.Error):
+            whatsapp.list_messages()
+        with self.assertRaises(sqlite3.Error):
+            whatsapp.get_chat("15550001111@s.whatsapp.net")
 
 
 if __name__ == "__main__":
