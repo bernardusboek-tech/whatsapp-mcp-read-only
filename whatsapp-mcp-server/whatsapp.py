@@ -1,7 +1,9 @@
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any, Dict, List, Optional
 import os
 import os.path
 import json
@@ -46,10 +48,15 @@ def require_messages_db() -> str:
             raise ConfigError("database path is denied")
     return db_real
 
-def connect_ro() -> sqlite3.Connection:
+@contextmanager
+def connect_ro() -> Iterator[sqlite3.Connection]:
     path = require_messages_db()
     uri = "file:" + urllib.parse.quote(path) + "?mode=ro"
-    return sqlite3.connect(uri, uri=True)
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 @dataclass
 class Message:
@@ -88,79 +95,17 @@ class MessageContext:
     before: List[Message]
     after: List[Message]
 
-def get_sender_name(sender_jid: str) -> str:
-    try:
-        conn = connect_ro()
-        cursor = conn.cursor()
-        
-        # First try matching by exact JID
-        cursor.execute("""
-            SELECT name
-            FROM chats
-            WHERE jid = ?
-            LIMIT 1
-        """, (sender_jid,))
-        
-        result = cursor.fetchone()
-        
-        # If no result, try looking for the number within JIDs
-        if not result:
-            # Extract the phone number part if it's a JID
-            if '@' in sender_jid:
-                phone_part = sender_jid.split('@')[0]
-            else:
-                phone_part = sender_jid
-                
-            cursor.execute("""
-                SELECT name
-                FROM chats
-                WHERE jid LIKE ?
-                LIMIT 1
-            """, (f"%{phone_part}%",))
-            
-            result = cursor.fetchone()
-        
-        if result and result[0]:
-            return result[0]
-        else:
-            return sender_jid
-        
-    except sqlite3.Error as e:
-        print(f"Database error while getting sender name: {e}")
-        return sender_jid
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-def format_message(message: Message, show_chat_info: bool = True) -> None:
-    """Print a single message with consistent formatting."""
-    output = ""
-    
-    if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
-    else:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
-        
-    content_prefix = ""
-    if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-    
-    try:
-        sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
-    except Exception as e:
-        print(f"Error formatting message: {e}")
-    return output
-
-def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> None:
-    output = ""
-    if not messages:
-        output += "No messages to display."
-        return output
-    
-    for message in messages:
-        output += format_message(message, show_chat_info)
-    return output
+def _json_ready(value: Any) -> Any:
+    """Datetimes and dataclasses cannot cross the MCP JSON boundary."""
+    if is_dataclass(value) and not isinstance(value, type):
+        value = asdict(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_ready(item) for key, item in value.items()}
+    return value
 
 def list_messages(
     after: Optional[str] = None,
@@ -173,10 +118,9 @@ def list_messages(
     include_context: bool = True,
     context_before: int = 1,
     context_after: int = 1
-) -> List[Message]:
+) -> List[Dict[str, Any]]:
     """Get messages matching the specified criteria with optional context."""
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         # Build base query
@@ -243,35 +187,25 @@ def list_messages(
             result.append(message)
             
         if include_context and result:
-            # Add context for each message
             messages_with_context = []
             for msg in result:
                 context = get_message_context(msg.id, context_before, context_after)
-                messages_with_context.extend(context.before)
-                messages_with_context.append(context.message)
-                messages_with_context.extend(context.after)
-            
-            return format_messages_list(messages_with_context, show_chat_info=True)
-            
-        # Format and display messages without context
-        return format_messages_list(result, show_chat_info=True)    
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+                messages_with_context.extend(context["before"])
+                messages_with_context.append(context["message"])
+                messages_with_context.extend(context["after"])
 
+            return messages_with_context
+
+        return _json_ready(result)
+        
 
 def get_message_context(
     message_id: str,
     before: int = 5,
     after: int = 5
-) -> MessageContext:
+) -> Dict[str, Any]:
     """Get context around a specific message."""
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         # Get the target message first
@@ -343,19 +277,12 @@ def get_message_context(
                 media_type=msg[7]
             ))
         
-        return MessageContext(
+        return _json_ready(MessageContext(
             message=target_message,
             before=before_messages,
             after=after_messages
-        )
+        ))
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        raise
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
 
 def list_chats(
     query: Optional[str] = None,
@@ -363,10 +290,9 @@ def list_chats(
     page: int = 0,
     include_last_message: bool = True,
     sort_by: str = "last_active"
-) -> List[Chat]:
+) -> List[Dict[str, Any]]:
     """Get chats matching the specified criteria."""
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         # Build base query
@@ -420,21 +346,13 @@ def list_chats(
                 last_is_from_me=chat_data[5]
             )
             result.append(chat)
-            
-        return result
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+        return _json_ready(result)
 
 
-def search_contacts(query: str) -> List[Contact]:
+def search_contacts(query: str) -> List[Dict[str, Any]]:
     """Search contacts by name or phone number."""
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         # Split query into characters to support partial matching
@@ -462,18 +380,11 @@ def search_contacts(query: str) -> List[Contact]:
                 jid=contact_data[0]
             )
             result.append(contact)
-            
-        return result
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+        return _json_ready(result)
 
 
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
+def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
     """Get all chats involving the contact.
     
     Args:
@@ -481,8 +392,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -513,21 +423,13 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
                 last_is_from_me=chat_data[5]
             )
             result.append(chat)
-            
-        return result
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+
+        return _json_ready(result)
 
 
-def get_last_interaction(jid: str) -> str:
+def get_last_interaction(jid: str) -> Optional[Dict[str, Any]]:
     """Get most recent message involving the contact."""
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -563,20 +465,12 @@ def get_last_interaction(jid: str) -> str:
             media_type=msg_data[7]
         )
         
-        return format_message(message)
+        return _json_ready(message)
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
 
-
-def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
+def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Dict[str, Any]]:
     """Get chat metadata by JID."""
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         query = """
@@ -604,27 +498,19 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
         if not chat_data:
             return None
             
-        return Chat(
+        return _json_ready(Chat(
             jid=chat_data[0],
             name=chat_data[1],
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5]
-        )
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
+        ))
 
 
-def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
+def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, Any]]:
     """Get chat metadata by sender phone number."""
-    try:
-        conn = connect_ro()
+    with connect_ro() as conn:
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -647,22 +533,15 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if not chat_data:
             return None
             
-        return Chat(
+        return _json_ready(Chat(
             jid=chat_data[0],
             name=chat_data[1],
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
             last_sender=chat_data[4],
             last_is_from_me=chat_data[5]
-        )
+        ))
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
 
 class _UnixHTTPConnection(HTTPConnection):
     """HTTP over a Unix socket. This process does not open a TCP connection."""
@@ -716,15 +595,12 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
         response = conn.getresponse()
         raw = response.read()
         if response.status != 200:
-            print("download failed")
             return None
         result = json.loads(raw.decode("utf-8"))
         if result.get("success"):
             return result.get("path")
-        print("download failed")
         return None
     except ConfigError:
         raise
     except (OSError, json.JSONDecodeError):
-        print("download failed")
         return None
