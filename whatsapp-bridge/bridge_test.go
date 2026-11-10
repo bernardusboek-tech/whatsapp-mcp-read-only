@@ -201,6 +201,59 @@ func TestHistoryStoresSyntheticTextWithoutLoggingIt(t *testing.T) {
 	}
 }
 
+func TestHistoryStoresCaptionWhenFirstMessageIsUnusable(t *testing.T) {
+	store := openTempStore(t)
+	caption := "synthetic-caption-charlie"
+	jid := "15550004444@s.whatsapp.net"
+	client := &fakeClient{user: "15550009999"}
+	n, err := handleHistorySync(client, store, &events.HistorySync{
+		Data: &waHist.HistorySync{
+			Conversations: []*waHist.Conversation{{
+				ID: proto.String(jid),
+				Messages: []*waHist.HistorySyncMsg{
+					nil,
+					{
+						Message: &waWeb.WebMessageInfo{
+							Key: &waCommon.MessageKey{
+								RemoteJID: proto.String(jid),
+								FromMe:    proto.Bool(false),
+								ID:        proto.String("H0"),
+							},
+							Message: &waE2E.Message{Conversation: proto.String("synthetic-skipped")},
+						},
+					},
+					{
+						Message: &waWeb.WebMessageInfo{
+							Key: &waCommon.MessageKey{
+								RemoteJID: proto.String(jid),
+								FromMe:    proto.Bool(false),
+								ID:        proto.String("H2"),
+							},
+							Message: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+								Caption: proto.String(caption),
+							}},
+							MessageTimestamp: proto.Uint64(1700000002),
+						},
+					},
+				},
+			}},
+		},
+	}, &textLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("stored %d", n)
+	}
+	rows, err := store.GetMessages(jid, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Content != caption || rows[0].Filename != "image_H2.jpg" {
+		t.Fatalf("rows = %#v", rows)
+	}
+}
+
 func TestRefusesConnectWithoutStoredSession(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "instance")
 	cfg, err := LoadConfig(dir, "", "", false)
