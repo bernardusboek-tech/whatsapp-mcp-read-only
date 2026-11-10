@@ -13,7 +13,6 @@ from whatsapp import (
     download_media as whatsapp_download_media
 )
 
-# Initialize FastMCP server
 mcp = FastMCP("whatsapp")
 
 @mcp.tool(structured_output=False)

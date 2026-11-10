@@ -71,11 +71,6 @@ class Chat:
     last_sender: Optional[str] = None
     last_is_from_me: Optional[bool] = None
 
-    @property
-    def is_group(self) -> bool:
-        """Determine if chat is a group based on JID pattern."""
-        return self.jid.endswith("@g.us")
-
 @dataclass
 class Contact:
     phone_number: str
@@ -93,7 +88,6 @@ def get_sender_name(sender_jid: str) -> str:
         conn = connect_ro()
         cursor = conn.cursor()
         
-        # First try matching by exact JID
         cursor.execute("""
             SELECT name
             FROM chats
@@ -103,9 +97,7 @@ def get_sender_name(sender_jid: str) -> str:
         
         result = cursor.fetchone()
         
-        # If no result, try looking for the number within JIDs
         if not result:
-            # Extract the phone number part if it's a JID
             if '@' in sender_jid:
                 phone_part = sender_jid.split('@')[0]
             else:
@@ -133,7 +125,7 @@ def get_sender_name(sender_jid: str) -> str:
             conn.close()
 
 def format_message(message: Message, show_chat_info: bool = True) -> None:
-    """Print a single message with consistent formatting."""
+    """Return one formatted message."""
     output = ""
     
     if show_chat_info and message.chat_name:
@@ -179,13 +171,11 @@ def list_messages(
         conn = connect_ro()
         cursor = conn.cursor()
         
-        # Build base query
         query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
         params = []
         
-        # Add filters
         if after:
             try:
                 after = datetime.fromisoformat(after)
@@ -219,7 +209,6 @@ def list_messages(
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
             
-        # Add pagination
         offset = page * limit
         query_parts.append("ORDER BY messages.timestamp DESC")
         query_parts.append("LIMIT ? OFFSET ?")
@@ -243,7 +232,6 @@ def list_messages(
             result.append(message)
             
         if include_context and result:
-            # Add context for each message
             messages_with_context = []
             for msg in result:
                 context = get_message_context(msg.id, context_before, context_after)
@@ -253,7 +241,6 @@ def list_messages(
             
             return format_messages_list(messages_with_context, show_chat_info=True)
             
-        # Format and display messages without context
         return format_messages_list(result, show_chat_info=True)    
         
     except sqlite3.Error as e:
@@ -274,7 +261,6 @@ def get_message_context(
         conn = connect_ro()
         cursor = conn.cursor()
         
-        # Get the target message first
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
             FROM messages
@@ -297,7 +283,6 @@ def get_message_context(
             media_type=msg_data[8]
         )
         
-        # Get messages before
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages
@@ -320,7 +305,6 @@ def get_message_context(
                 media_type=msg[7]
             ))
         
-        # Get messages after
         cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages
@@ -369,7 +353,6 @@ def list_chats(
         conn = connect_ro()
         cursor = conn.cursor()
         
-        # Build base query
         query_parts = ["""
             SELECT 
                 chats.jid,
@@ -397,11 +380,9 @@ def list_chats(
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
             
-        # Add sorting
         order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
         query_parts.append(f"ORDER BY {order_by}")
         
-        # Add pagination
         offset = (page ) * limit
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit, offset])
@@ -437,7 +418,6 @@ def search_contacts(query: str) -> List[Contact]:
         conn = connect_ro()
         cursor = conn.cursor()
         
-        # Split query into characters to support partial matching
         search_pattern = '%' +query + '%'
         
         cursor.execute("""
