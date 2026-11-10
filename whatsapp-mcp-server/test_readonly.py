@@ -1,4 +1,5 @@
 import ast
+import io
 import json
 import os
 import sqlite3
@@ -7,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import whatsapp
@@ -66,6 +68,18 @@ def write_db(directory: Path, rows: list) -> Path:
     return path
 
 
+def add_message(db: Path, message_id: str, chat_jid: str, sender: str, content: str, timestamp: str) -> None:
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """INSERT INTO messages
+        (id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename)
+        VALUES (?, ?, ?, ?, ?, 0, '', '')""",
+        (message_id, chat_jid, sender, content, timestamp),
+    )
+    conn.commit()
+    conn.close()
+
+
 class ReadOnlyMCPTests(unittest.TestCase):
     def setUp(self):
         self._env = os.environ.copy()
@@ -118,20 +132,19 @@ class ReadOnlyMCPTests(unittest.TestCase):
         left_db = write_db(left, [rows[0]])
         right_db = write_db(right, [rows[1]])
         self.use(left, left_db)
-        found = whatsapp.list_messages(include_context=False)
+        found = json.dumps(whatsapp.list_messages(include_context=False))
         self.assertIn("synthetic-fixture-alpha", found)
         self.assertNotIn("synthetic-fixture-beta", found)
         self.use(right, right_db)
-        found = whatsapp.list_messages(include_context=False)
+        found = json.dumps(whatsapp.list_messages(include_context=False))
         self.assertIn("synthetic-fixture-beta", found)
         self.assertNotIn("synthetic-fixture-alpha", found)
         self.use(left, left_db)
-        conn = whatsapp.connect_ro()
-        with self.assertRaises(sqlite3.OperationalError):
-            conn.execute(
-                "INSERT INTO chats (jid, name, last_message_time) VALUES ('x', 'y', '2024-01-02T03:04:05')"
-            )
-        conn.close()
+        with whatsapp.connect_ro() as conn:
+            with self.assertRaises(sqlite3.OperationalError):
+                conn.execute(
+                    "INSERT INTO chats (jid, name, last_message_time) VALUES ('x', 'y', '2024-01-02T03:04:05')"
+                )
 
     def test_missing_or_denied_paths_fail_closed(self):
         os.environ["WA_INSTANCE_DIR"] = "relative/instance"
@@ -142,7 +155,8 @@ class ReadOnlyMCPTests(unittest.TestCase):
         missing.mkdir(mode=0o700)
         self.use(missing, missing / "messages.db")
         with self.assertRaises(sqlite3.OperationalError):
-            whatsapp.connect_ro()
+            with whatsapp.connect_ro():
+                pass
         rows = load_fixture()
         db = write_db(self.base / "real", [rows[0]])
         self.use(db.parent, db)
@@ -216,6 +230,180 @@ class ReadOnlyMCPTests(unittest.TestCase):
         self.assertIn(b"POST /api/download HTTP/1.1", request)
         self.assertNotIn(b"/api/send", request)
         self.assertNotIn(b"synthetic-fixture-alpha", request)
+
+    def test_tool_results_are_json(self):
+        import main
+
+        rows = load_fixture()
+        directory = self.base / "json"
+        db = write_db(directory, rows)
+        self.use(directory, db)
+        jid = rows[0]["jid"]
+        message_id = rows[0]["message_id"]
+        cases = {
+            "search_contacts": [lambda: main.search_contacts("Synthetic")],
+            "list_messages": [
+                lambda: main.list_messages(include_context=False, limit=5),
+                lambda: main.list_messages(include_context=True, limit=5, context_before=1, context_after=1),
+            ],
+            "list_chats": [lambda: main.list_chats()],
+            "get_chat": [
+                lambda: main.get_chat(jid),
+                lambda: main.get_chat("missing@s.whatsapp.net"),
+            ],
+            "get_direct_chat_by_contact": [
+                lambda: main.get_direct_chat_by_contact("15550001111"),
+                lambda: main.get_direct_chat_by_contact("000"),
+            ],
+            "get_contact_chats": [lambda: main.get_contact_chats(jid)],
+            "get_last_interaction": [
+                lambda: main.get_last_interaction(jid),
+                lambda: main.get_last_interaction("missing@s.whatsapp.net"),
+            ],
+            "get_message_context": [lambda: main.get_message_context(message_id, before=1, after=1)],
+            "download_media": [lambda: main.download_media(message_id, jid)],
+        }
+        tools = {tool.name: tool for tool in main.mcp._tool_manager.list_tools()}
+        self.assertEqual(set(cases), set(tools))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            for name, calls in cases.items():
+                tool = tools[name]
+                self.assertIsNotNone(tool.output_schema, name)
+                for call in calls:
+                    result = call()
+                    json.dumps(result)
+                    tool.fn_metadata.convert_result(result)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_contact_chats_are_one_row_per_chat(self):
+        phone = "15550003333"
+        direct = f"{phone}@s.whatsapp.net"
+        group = "12036300003333@g.us"
+        directory = self.base / "one-row"
+        db = write_db(
+            directory,
+            [
+                {
+                    "jid": direct,
+                    "name": "Ada",
+                    "message_id": "d-last",
+                    "sender": phone,
+                    "content": "direct-last",
+                    "timestamp": "2024-03-01T00:00:03",
+                },
+                {
+                    "jid": group,
+                    "name": "Crew",
+                    "message_id": "g-last",
+                    "sender": "15550004444",
+                    "content": "group-last",
+                    "timestamp": "2024-03-02T00:00:04",
+                },
+            ],
+        )
+        add_message(db, "d-1", direct, phone, "direct-first", "2024-03-01T00:00:01")
+        add_message(db, "d-2", direct, f"{phone}@s.whatsapp.net", "direct-mid", "2024-03-01T00:00:02")
+        add_message(db, "g-1", group, phone, "group-from-ada", "2024-03-01T00:00:05")
+        self.use(directory, db)
+
+        by_phone = whatsapp.get_contact_chats(phone)
+        by_jid = whatsapp.get_contact_chats(direct)
+        self.assertEqual([chat["jid"] for chat in by_phone], [group, direct])
+        self.assertEqual([chat["jid"] for chat in by_jid], [group, direct])
+        listed = {chat["jid"]: chat for chat in whatsapp.list_chats(limit=10)}
+        for chat in by_phone:
+            self.assertEqual(chat["last_message"], listed[chat["jid"]]["last_message"])
+            self.assertEqual(chat["last_sender"], listed[chat["jid"]]["last_sender"])
+        self.assertEqual(listed[direct]["last_message"], "direct-last")
+        self.assertEqual(listed[group]["last_message"], "group-last")
+
+    def test_phone_and_jid_match_the_same_rows(self):
+        phone = "15550003333"
+        jid = f"{phone}@s.whatsapp.net"
+        group = "12036300003333@g.us"
+        directory = self.base / "match"
+        db = write_db(
+            directory,
+            [
+                {
+                    "jid": jid,
+                    "name": "Ada",
+                    "message_id": "direct-1",
+                    "sender": jid,
+                    "content": "hello-direct",
+                    "timestamp": "2024-04-01T00:00:01",
+                },
+                {
+                    "jid": group,
+                    "name": "Crew",
+                    "message_id": "group-1",
+                    "sender": phone,
+                    "content": "hello-group",
+                    "timestamp": "2024-04-01T00:00:02",
+                },
+            ],
+        )
+        self.use(directory, db)
+
+        def message_ids(sender):
+            rows = whatsapp.list_messages(sender_phone_number=sender, include_context=False, limit=10)
+            return sorted(row["id"] for row in rows)
+
+        self.assertEqual(message_ids(phone), ["direct-1", "group-1"])
+        self.assertEqual(message_ids(jid), ["direct-1", "group-1"])
+        self.assertEqual(whatsapp.list_messages(sender_phone_number="19990000000", include_context=False), [])
+        self.assertEqual(whatsapp.get_last_interaction(phone)["id"], "group-1")
+        self.assertEqual(whatsapp.get_last_interaction(jid)["id"], "group-1")
+        self.assertIsNone(whatsapp.get_last_interaction("19990000000"))
+        self.assertEqual(whatsapp.get_direct_chat_by_contact(phone)["jid"], jid)
+        self.assertEqual(whatsapp.get_direct_chat_by_contact(jid)["jid"], jid)
+        self.assertIsNone(whatsapp.get_direct_chat_by_contact("19990000000"))
+        self.assertEqual(
+            sorted(contact["jid"] for contact in whatsapp.search_contacts(phone)),
+            [jid],
+        )
+        self.assertEqual(
+            sorted(chat["jid"] for chat in whatsapp.list_chats(query=jid)),
+            [jid],
+        )
+
+    def test_message_context_before_is_chronological(self):
+        jid = "15550005555@s.whatsapp.net"
+        directory = self.base / "context"
+        db = write_db(
+            directory,
+            [
+                {
+                    "jid": jid,
+                    "name": "Bea",
+                    "message_id": "m3",
+                    "sender": "15550005555",
+                    "content": "third",
+                    "timestamp": "2024-05-01T00:00:03",
+                }
+            ],
+        )
+        add_message(db, "m1", jid, "15550005555", "first", "2024-05-01T00:00:01")
+        add_message(db, "m2", jid, "15550005555", "second", "2024-05-01T00:00:02")
+        add_message(db, "m4", jid, "15550005555", "fourth", "2024-05-01T00:00:04")
+        self.use(directory, db)
+        context = whatsapp.get_message_context("m3", before=2, after=1)
+        self.assertEqual([item["content"] for item in context["before"]], ["first", "second"])
+        self.assertEqual(context["message"]["content"], "third")
+        self.assertEqual([item["content"] for item in context["after"]], ["fourth"])
+
+    def test_database_errors_raise(self):
+        directory = self.base / "not-a-database"
+        directory.mkdir(mode=0o700)
+        db = directory / "messages.db"
+        db.write_text("not a database", encoding="utf-8")
+        os.chmod(db, 0o600)
+        self.use(directory, db)
+        with self.assertRaises(sqlite3.Error):
+            whatsapp.list_messages()
+        with self.assertRaises(sqlite3.Error):
+            whatsapp.get_chat("15550001111@s.whatsapp.net")
 
 
 if __name__ == "__main__":
