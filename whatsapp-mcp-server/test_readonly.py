@@ -393,6 +393,90 @@ class ReadOnlyMCPTests(unittest.TestCase):
         self.assertEqual(context["message"]["content"], "third")
         self.assertEqual([item["content"] for item in context["after"]], ["fourth"])
 
+    def test_limits_are_clamped(self):
+        phone = "15550007000"
+        rows = []
+        for i in range(101):
+            rows.append({
+                "jid": f"15551{i:04d}@s.whatsapp.net",
+                "name": f"Synthetic {i}",
+                "message_id": f"size-{i}",
+                "sender": phone,
+                "content": f"row-{i}",
+                "timestamp": f"2024-06-01T{(i // 60) % 24:02d}:{i % 60:02d}:00",
+            })
+        directory = self.base / "limits"
+        db = write_db(directory, rows)
+        self.use(directory, db)
+        newest = "155510100@s.whatsapp.net"
+        oldest = "155510000@s.whatsapp.net"
+
+        self.assertEqual(len(whatsapp.list_chats(limit=20)), 20)
+        self.assertEqual(len(whatsapp.list_chats(limit=100)), 100)
+        self.assertEqual(len(whatsapp.list_chats(limit=500)), 100)
+        self.assertEqual([chat["jid"] for chat in whatsapp.list_chats(limit=-1)], [newest])
+        self.assertEqual([chat["jid"] for chat in whatsapp.list_chats(limit=500, page=1)], [oldest])
+
+        self.assertEqual(len(whatsapp.get_contact_chats(phone, limit=20)), 20)
+        self.assertEqual(len(whatsapp.get_contact_chats(phone, limit=1000)), 100)
+        self.assertEqual([chat["jid"] for chat in whatsapp.get_contact_chats(phone, limit=0)], [newest])
+
+        self.assertEqual(len(whatsapp.list_messages(include_context=False, limit=20)), 20)
+        self.assertEqual(len(whatsapp.list_messages(include_context=False, limit=100)), 100)
+        self.assertEqual(
+            [row["id"] for row in whatsapp.list_messages(include_context=False, limit=10**6)],
+            [f"size-{i}" for i in range(100, 0, -1)],
+        )
+        self.assertEqual(
+            [row["id"] for row in whatsapp.list_messages(include_context=False, limit=-1)],
+            ["size-100"],
+        )
+        self.assertEqual(
+            [row["id"] for row in whatsapp.list_messages(include_context=False, limit=1000, page=1)],
+            ["size-0"],
+        )
+
+    def test_context_windows_are_clamped(self):
+        jid = "15550005555@s.whatsapp.net"
+        directory = self.base / "window"
+        db = write_db(
+            directory,
+            [
+                {
+                    "jid": jid,
+                    "name": "Bea",
+                    "message_id": "target",
+                    "sender": "15550005555",
+                    "content": "target",
+                    "timestamp": "2024-05-01T12:00:00",
+                }
+            ],
+        )
+        for i in range(21):
+            add_message(db, f"b{i}", jid, "15550005555", f"before-{i}", f"2024-05-01T10:{i:02d}:00")
+            add_message(db, f"a{i}", jid, "15550005555", f"after-{i}", f"2024-05-01T14:{i:02d}:00")
+        self.use(directory, db)
+
+        wide = whatsapp.get_message_context("target", before=100, after=100)
+        self.assertEqual([item["content"] for item in wide["before"]], [f"before-{i}" for i in range(1, 21)])
+        self.assertEqual([item["content"] for item in wide["after"]], [f"after-{i}" for i in range(20)])
+        kept = whatsapp.get_message_context("target", before=5, after=0)
+        self.assertEqual([item["content"] for item in kept["before"]], [f"before-{i}" for i in range(16, 21)])
+        self.assertEqual(kept["after"], [])
+        empty = whatsapp.get_message_context("target", before=-4, after=-1)
+        self.assertEqual(empty["before"], [])
+        self.assertEqual(empty["after"], [])
+
+        listed = whatsapp.list_messages(
+            chat_jid=jid,
+            query="target",
+            limit=1,
+            include_context=True,
+            context_before=100,
+            context_after=100,
+        )
+        self.assertEqual([item["id"] for item in listed], [f"b{i}" for i in range(1, 21)] + ["target"] + [f"a{i}" for i in range(20)])
+
     def test_database_errors_raise(self):
         directory = self.base / "not-a-database"
         directory.mkdir(mode=0o700)
