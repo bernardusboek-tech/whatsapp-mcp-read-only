@@ -12,7 +12,7 @@ FROM docker.io/library/python:3.11-slim-bookworm
 RUN useradd --uid 65532 --create-home --shell /usr/sbin/nologin app
 WORKDIR /app
 COPY whatsapp-mcp-server/*.py /app/whatsapp-mcp-server/
-RUN pip install --no-cache-dir "mcp==1.25.0" "httpx>=0.28.1" \
+RUN pip install --no-cache-dir "mcp==1.25.0" "httpx==0.28.1" \
     && rm -rf /root/.cache
 COPY --from=bridge /out/whatsapp-bridge /app/whatsapp-bridge
 COPY deploy/entrypoint.sh /app/entrypoint.sh

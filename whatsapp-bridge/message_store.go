@@ -83,7 +83,10 @@ func (store *MessageStore) Close() error {
 
 func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time) error {
 	_, err := store.db.Exec(
-		"INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)",
+		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			name = excluded.name,
+			last_message_time = MAX(last_message_time, excluded.last_message_time)`,
 		jid, name, lastMessageTime,
 	)
 	return err
